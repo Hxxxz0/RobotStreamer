@@ -45,8 +45,8 @@ MotionDiffusionCore 是一个用于机器人动作序列生成的深度学习框
     ┌───────────────────────────────┐
     │  DiffLoss (Diffusion Head)    │  ← 扩散生成
     │  - AdaLN MLP                  │
-    │  - 50步高斯扩散                 │
-    │  - Cosine 噪声调度             │
+    │  - DDIM 快速采样（默认10步）     │
+    │  - Squared Cosine 噪声调度     │
     └───────────────────────────────┘
                 ↓
        输出：未来5帧动作 (38D×5)
@@ -76,12 +76,13 @@ MotionDiffusionCore 是一个用于机器人动作序列生成的深度学习框
   - 目标动作序列 (5×38=190D)
   - 条件向量 z (512D)
 - **输出**：生成的 5 帧动作
-- **训练**：学习从高斯噪声逐步去噪到目标动作
-- **推理**：从随机噪声开始，50 步迭代去噪生成动作
+- **训练**：使用 DDPM 学习从高斯噪声逐步去噪到目标动作（1000 步）
+- **推理**：使用 DDIM 快速采样（默认 10 步，可配置 50 步以提升质量）
 - **特性**：
   - **AdaLN (Adaptive Layer Normalization)**：条件向量 z 调制网络参数
   - **Timestep Embedding**：将扩散时间步嵌入到网络
-  - **Cosine Schedule**：平滑的噪声添加/去除曲线
+  - **Squared Cosine Cap V2 Schedule**：改进的噪声调度，训练更稳定
+  - **HuggingFace Diffusers 框架**：基于标准库实现，支持多种噪声调度和采样策略
 
 ---
 
@@ -276,6 +277,16 @@ accelerate launch --mixed_precision no --num_processes 4 \
 | `--num_diffusion_head_layers` | 4 | 扩散头层数 |
 | `--motion_dim` | 38 | 动作维度 |
 
+#### 扩散模型参数
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--num_sampling_steps` | 10 | DDIM 推理采样步数（10=快速，50=高质量） |
+| `--num_train_timesteps` | 1000 | 训练时扩散总步数 |
+| `--beta_schedule` | `squaredcos_cap_v2` | 噪声调度类型（linear/scaled_linear/squaredcos_cap_v2） |
+| `--prediction_type` | `sample` | 模型预测目标：`sample`(x0) 或 `epsilon`(噪声) |
+| `--diffusion_width` | 512 | 扩散头隐藏层维度 |
+| `--grad_checkpointing` | false | 梯度检查点（节省显存） |
+
 #### 文本编码器参数
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
@@ -363,19 +374,41 @@ python scripts/infer_stream.py \
   --out_dir infer_output
 ```
 
+### 高质量推理（50步采样）
+
+```bash
+python scripts/infer_stream.py \
+  --ckpt outputs/motion_diff/latest.pth \
+  --mean /limx_embap/tos/user/Jensen/project/dataset/statistics/Mean.npy \
+  --std /limx_embap/tos/user/Jensen/project/dataset/statistics/Std.npy \
+  --text "机器人跳跃" \
+  --num_sampling_steps 50 \
+  --cfg 2.0 \
+  --out_dir infer_output
+```
+
+**说明：**
+- `--num_sampling_steps 10`（默认）：速度最快，适合实时应用
+- `--num_sampling_steps 50`：质量更高，适合离线生成
+
 ### 推理参数说明
 
-| 参数 | 必需 | 说明 |
-|------|------|------|
-| `--ckpt` | ✅ | 模型检查点路径 |
-| `--mean` | ✅ | 归一化均值文件 |
-| `--std` | ✅ | 归一化标准差文件 |
-| `--text` | ✅ | 文本描述（中英文均可） |
-| `--history_npy` | ❌ | 历史动作 (N, 38)，不提供则从零开始 |
-| `--max_motion_length` | ❌ | 最大生成长度（默认 100） |
-| `--cfg` | ❌ | CFG 引导强度（默认 1.0，越大越符合文本） |
-| `--temperature` | ❌ | 扩散温度（默认 1.0，越大越随机） |
-| `--out_dir` | ❌ | 输出目录（默认 `output`） |
+| 参数 | 必需 | 默认值 | 说明 |
+|------|------|--------|------|
+| `--ckpt` | ✅ | - | 模型检查点路径 |
+| `--mean` | ✅ | - | 归一化均值文件 |
+| `--std` | ✅ | - | 归一化标准差文件 |
+| `--text` | ✅ | - | 文本描述（中英文均可） |
+| `--history_npy` | ❌ | None | 历史动作 (N, 38)，不提供则从零开始 |
+| `--max_motion_length` | ❌ | 100 | 最大生成长度 |
+| `--cfg` | ❌ | 1.0 | CFG 引导强度（>1.0 增强文本一致性） |
+| `--temperature` | ❌ | 1.0 | 扩散温度（>1.0 增加随机性） |
+| `--num_sampling_steps` | ❌ | 10 | DDIM 采样步数（10=快速，50=高质量） |
+| `--num_train_timesteps` | ❌ | 1000 | 训练时扩散步数（需与训练时一致） |
+| `--beta_schedule` | ❌ | `squaredcos_cap_v2` | 噪声调度类型 |
+| `--prediction_type` | ❌ | `sample` | 预测类型（sample/epsilon） |
+| `--diffusion_width` | ❌ | 512 | 扩散头隐藏维度 |
+| `--out_dir` | ❌ | `output` | 输出目录 |
 
 ### 流式生成原理
 
@@ -419,8 +452,8 @@ MotionDiffusionCore/
 │   ├── motion_diffusion.py     # 🎯 主模型（MLP + Transformer + Diffusion）
 │   ├── token_mlp.py            # 动作→token MLP (38→16)
 │   ├── transformer.py          # LLaMAHF Transformer
-│   ├── diffloss.py             # 扩散头 (AdaLN MLP)
-│   └── diffusion/              # 扩散模型核心
+│   ├── diffloss.py             # 扩散头（基于 HuggingFace Diffusers）
+│   └── diffusion/              # 扩散模型工具（兼容旧代码）
 │       ├── __init__.py
 │       ├── gaussian_diffusion.py   # 高斯扩散过程
 │       ├── respace.py             # 时间步重映射
@@ -449,6 +482,48 @@ MotionDiffusionCore/
 ├── .gitignore
 └── README.md
 ```
+
+---
+
+## ⚙️ 扩散模型实现
+
+本项目使用 **HuggingFace Diffusers** 库实现扩散模型，提供标准化、灵活的扩散训练和采样接口。
+
+### 为什么使用 Diffusers？
+
+1. **标准化实现**：避免自定义扩散代码的 bug 和维护成本
+2. **丰富的调度器**：支持 DDPM、DDIM、PNDM 等多种采样策略
+3. **灵活配置**：噪声调度、预测类型、采样步数等均可自由调整
+4. **社区支持**：与主流扩散模型（Stable Diffusion 等）使用相同底层
+
+### 训练 vs 推理
+
+```python
+# 训练时：DDPMScheduler（1000步完整扩散）
+self.train_scheduler = DDPMScheduler(
+    num_train_timesteps=1000,
+    beta_schedule="squaredcos_cap_v2",
+    prediction_type="sample"  # 预测 x0
+)
+
+# 推理时：DDIMScheduler（10步快速采样）
+self.inference_scheduler = DDIMScheduler(
+    num_train_timesteps=1000,  # 与训练一致
+    beta_schedule="squaredcos_cap_v2",
+    prediction_type="sample"
+)
+# 设置推理步数
+self.inference_scheduler.set_timesteps(num_sampling_steps=10)
+```
+
+### 关键配置说明
+
+| 配置项 | 训练值 | 推理值 | 说明 |
+|--------|--------|--------|------|
+| `num_train_timesteps` | 1000 | 1000 | 扩散总步数（两者必须一致） |
+| `beta_schedule` | squaredcos_cap_v2 | squaredcos_cap_v2 | 噪声调度（两者必须一致） |
+| `prediction_type` | sample | sample | 预测目标：x0（两者必须一致） |
+| 实际采样步数 | 1 步/iter | 10-50 步 | 训练随机采样，推理 DDIM 加速 |
 
 ---
 
@@ -485,10 +560,15 @@ MotionDiffusionCore/
 
 ### 扩散训练细节
 
-- **噪声调度**：Cosine schedule (平滑的方差曲线)
-- **训练步数**：1000 步（训练时随机采样一步）
-- **推理步数**：50 步（SpacedDiffusion 重映射）
-- **损失函数**：MSE loss (预测噪声 vs 真实噪声)
+- **扩散框架**：HuggingFace Diffusers（标准化实现）
+- **训练调度器**：DDPMScheduler
+  - **噪声调度**：Squared Cosine Cap V2（训练更稳定）
+  - **训练步数**：1000 步（训练时随机采样一步）
+  - **预测类型**：sample（直接预测 x0，而非噪声 ε）
+- **推理调度器**：DDIMScheduler（快速采样）
+  - **推理步数**：10 步（默认，可配置 50 步提升质量）
+  - **加速原理**：DDIM 跳步采样，10 步可达 1000 步约 90% 质量
+- **损失函数**：MSE loss（预测 x0 vs 真实 x0）
 
 ---
 
@@ -523,7 +603,23 @@ MotionDiffusionCore/
 
 ## 🔗 外部依赖
 
-### 1. StableMoFusion 工具（必需）
+### 1. Python 包依赖
+
+项目已通过 `environment.yaml` 配置所有依赖，包括：
+
+**核心依赖：**
+- **`diffusers==0.31.0`**：HuggingFace 扩散模型框架（DDPM/DDIM 调度器）
+- **`accelerate`**：分布式训练框架
+- **`torch`**：深度学习框架
+- **`transformers`**：文本编码器（T5/BGE）
+
+安装命令：
+```bash
+conda env create -f environment.yaml
+conda activate mgpt
+```
+
+### 2. StableMoFusion 工具（必需）
 
 用于处理 NPZ 动作文件。**任选一种方式**：
 
@@ -538,7 +634,7 @@ export STABLE_UTILS_DIR=/path/to/StableMoFusion/utils
 
 系统会自动搜索：`$STABLE_UTILS_DIR` → `external/` → 默认路径
 
-### 2. 文本编码器（可选）
+### 3. 文本编码器（可选）
 
 首次运行会自动下载。**可选加速**：
 
@@ -563,8 +659,10 @@ cp -r /limx_embap/tos/user/Jensen/project/MotionStreamer/flan-t5-small \
 | Motion Dim | 38 | 动作维度 |
 | Latent Dim | 16 | Token 维度 |
 | Hidden Size | 512 | Transformer 隐藏层 |
-| Diffusion Steps (train) | 1000 | 训练时扩散步数 |
-| Diffusion Steps (infer) | 50 | 推理时扩散步数 |
+| Diffusion Steps (train) | 1000 | 训练时扩散步数（DDPM） |
+| Diffusion Steps (infer) | 10 | 推理时采样步数（DDIM，可配置 50） |
+| Beta Schedule | squaredcos_cap_v2 | 噪声调度类型 |
+| Prediction Type | sample | 预测目标（x0） |
 | Batch Size | 256 | 批次大小 |
 | Learning Rate | 1e-4 | 初始学习率 |
 | Total Iterations | 100k | 总训练步数 |
@@ -603,7 +701,17 @@ A: 经验值：
 - 50k 步：文本-动作对齐较好
 - 100k 步：充分收敛
 
-### Q6: `/tmp` 空间不足怎么办？
+### Q6: 推理采样步数如何选择？
+A: 
+- **10 步（默认）**：速度快，质量已达 90%，适合实时/交互应用
+- **50 步**：质量最优，适合离线高质量生成
+- **权衡**：10 步约 0.5 秒/次，50 步约 2.5 秒/次（单 GPU）
+
+建议：
+- 开发调试：10 步
+- 最终演示/发布：50 步
+
+### Q8: `/tmp` 空间不足怎么办？
 A: 训练脚本已自动配置：
 - 临时文件：`项目目录/.tmp/`（DataLoader multiprocessing）
 - HuggingFace 缓存：`项目目录/.cache/huggingface/`
@@ -614,7 +722,7 @@ A: 训练脚本已自动配置：
 rm -rf .tmp/ .cache/
 ```
 
-### Q7: 如何加快数据加载速度？
+### Q9: 如何加快数据加载速度？
 A: **已实现自动缓存机制** 🚀
 - **第一次训练**：预处理所有数据（2-5 分钟），并保存缓存到项目目录
 - **后续训练**：直接加载缓存（5-10 秒），加速 **10-50 倍**！
@@ -659,6 +767,11 @@ rm -rf .cache/datasets/
 6. **Zero-Padding**：短序列补 0 是在**归一化空间**，不影响训练
 
 7. **路径迁移**：如需在不同机器/环境运行，只需修改配置文件或传入路径参数，无需修改代码
+
+8. **⚠️ 扩散配置一致性（重要）**：
+   - 推理时 `num_train_timesteps`、`beta_schedule`、`prediction_type` **必须与训练时一致**
+   - 只有 `num_sampling_steps` 可以在推理时自由调整（10 或 50）
+   - 如果加载旧模型出错，检查 checkpoint 中保存的配置参数
 
 ---
 
