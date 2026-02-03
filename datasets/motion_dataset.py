@@ -1,0 +1,665 @@
+"""
+Motion datasets with configurable paths.
+Supports HumanML3D, BABEL Stream, and HumanML3D Stream datasets.
+"""
+
+import os
+import sys
+import random
+import codecs as cs
+import importlib.util
+import warnings
+import pickle
+import hashlib
+from os.path import join as pjoin
+
+import numpy as np
+import torch
+from torch.utils import data
+
+# Suppress torch.cross deprecation warning from external libraries
+warnings.filterwarnings("ignore", message=".*torch.cross.*", category=UserWarning)
+
+
+class BaseMotionDataset(data.Dataset):
+    """Base class for motion datasets with configurable paths."""
+
+    def __init__(
+        self,
+        meta_dir,
+        history_len=60,
+        pred_len=5,
+        unit_length=1,
+        fps=50,
+    ):
+        self.history_len = history_len
+        self.pred_len = pred_len
+        self.unit_length = unit_length
+        self.fps = fps
+        self.process_robot_npz = None
+        self.data_list = []
+        self.meta_dir = meta_dir
+
+        # Load normalization statistics
+        self.mean = np.load(pjoin(self.meta_dir, "Mean.npy"))
+        self.std = np.load(pjoin(self.meta_dir, "Std.npy"))
+
+    def _get_cache_path(self, data_root, dataset_name):
+        """Generate cache file path in project directory."""
+        # Get project root (2 levels up from this file)
+        current_file = os.path.abspath(__file__)
+        project_root = os.path.dirname(os.path.dirname(current_file))
+        
+        # Create cache directory in project root
+        cache_dir = pjoin(project_root, ".cache", "datasets")
+        os.makedirs(cache_dir, exist_ok=True)
+        
+        # Generate unique cache key from dataset path + configuration
+        data_root_hash = hashlib.md5(data_root.encode()).hexdigest()[:8]
+        config_str = f"{self.history_len}_{self.pred_len}_{self.unit_length}_{self.fps}"
+        config_hash = hashlib.md5(config_str.encode()).hexdigest()[:8]
+        
+        # Cache filename: dataset_name + data_path_hash + config_hash
+        cache_file = pjoin(cache_dir, f"{dataset_name}_{data_root_hash}_{config_hash}.pkl")
+        
+        return cache_file
+
+    def _load_cache(self, cache_file, dataset_name):
+        """Load preprocessed data from cache."""
+        is_main = int(os.environ.get("LOCAL_RANK", 0)) == 0
+        if os.path.exists(cache_file):
+            if is_main:
+                print(f"[{dataset_name}] Loading from cache: {cache_file}")
+            with open(cache_file, 'rb') as f:
+                self.data_list = pickle.load(f)
+            if is_main:
+                print(f"[{dataset_name}] Loaded {len(self.data_list)} samples from cache")
+            return True
+        return False
+
+    def _save_cache(self, cache_file, dataset_name):
+        """Save preprocessed data to cache."""
+        is_main = int(os.environ.get("LOCAL_RANK", 0)) == 0
+        if is_main:
+            print(f"[{dataset_name}] Saving cache to {cache_file}")
+            with open(cache_file, 'wb') as f:
+                pickle.dump(self.data_list, f)
+            print(f"[{dataset_name}] Cache saved!")
+
+    def _ensure_process_robot_npz(self):
+        """Lazy load robot NPZ processing utilities."""
+        if self.process_robot_npz is not None:
+            return
+        
+        # Try direct import first (if installed as package)
+        try:
+            from utils.robot_process import process_robot_npz
+            self.process_robot_npz = process_robot_npz
+            return
+        except ImportError:
+            pass
+        
+        # Fallback: auto-detect from common locations
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        search_paths = [
+            os.environ.get("STABLE_UTILS_DIR"),
+            pjoin(project_root, "external/StableMoFusion/utils"),
+            "/limx_embap/tos/user/Jensen/dataset/motion_data/StableMoFusion/utils",
+        ]
+        
+        utils_dir = None
+        for path in search_paths:
+            if path and os.path.isfile(pjoin(path, "robot_process.py")):
+                utils_dir = path
+                break
+        
+        if not utils_dir:
+            raise ImportError(
+                "StableMoFusion not found. Please:\n"
+                "  export STABLE_UTILS_DIR=/path/to/StableMoFusion/utils\n"
+                "Or place in: external/StableMoFusion/"
+            )
+        
+        # Load all required modules
+        def load_module(mod_name, filename):
+            spec = importlib.util.spec_from_file_location(mod_name, pjoin(utils_dir, filename))
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[mod_name] = module
+            spec.loader.exec_module(module)
+            return module
+        
+        # Load dependencies first
+        load_module("utils.quaternion", "quaternion.py")
+        load_module("utils.rotation_utils", "rotation_utils.py")
+        robot_mod = load_module("utils.robot_process", "robot_process.py")
+        
+        self.process_robot_npz = robot_mod.process_robot_npz
+
+    def _load_motion(self, path):
+        """Load and validate motion from npz file."""
+        min_len = (self.history_len + self.pred_len) * self.unit_length
+        try:
+            npz = np.load(path)
+        except Exception:
+            return None
+        self._ensure_process_robot_npz()
+        motion = self.process_robot_npz(npz, root_idx=0)
+        if len(motion) < min_len:
+            return None
+        return motion
+
+    def _build_history_window(self, motion, step_idx):
+        """Build history window with zero-padding if needed."""
+        start = max(0, step_idx - self.history_len + 1)
+        history = motion[start : step_idx + 1]
+        if history.shape[0] < self.history_len:
+            pad_count = self.history_len - history.shape[0]
+            pad = np.zeros((pad_count, motion.shape[1]), dtype=motion.dtype)
+            history = np.concatenate([pad, history], axis=0)
+        return history
+
+    def __len__(self):
+        return len(self.data_list)
+
+    def __getitem__(self, item):
+        raise NotImplementedError
+
+
+class HumanML3DDataset(BaseMotionDataset):
+    """HumanML3D dataset with configurable paths."""
+
+    def __init__(
+        self,
+        data_root,
+        meta_dir,
+        history_len=60,
+        pred_len=5,
+        unit_length=1,
+        fps=50,
+    ):
+        super().__init__(meta_dir, history_len, pred_len, unit_length, fps)
+        
+        self.motion_dir = pjoin(data_root, "npz")
+        self.text_dir = pjoin(data_root, "texts")
+
+        # Try to load from cache first
+        cache_file = self._get_cache_path(data_root, "humanml3d")
+        if self._load_cache(cache_file, "HumanML3D"):
+            return  # Cache loaded successfully
+
+        # Cache not found, preprocess from scratch
+        file_list = [pjoin(self.motion_dir, f) for f in os.listdir(self.motion_dir) if f.endswith(".npz")]
+        if not file_list:
+            raise FileNotFoundError(f"No npz files found in {self.motion_dir}")
+
+        total_files = len(file_list)
+        # Only print from main process (rank 0) in distributed training
+        is_main = int(os.environ.get("LOCAL_RANK", 0)) == 0
+        if is_main:
+            print(f"[HumanML3D] Cache not found, preprocessing {total_files} npz files...")
+        min_len = self.pred_len  # Only need at least pred_len frames, history will be 0-padded
+        
+        for idx, path in enumerate(file_list):
+            # Progress every 10%
+            if is_main and idx % (max(1, total_files // 10)) == 0:
+                progress = round((idx / total_files) * 100)
+                print(f"[HumanML3D] Progress: {progress}% ({idx}/{total_files})")
+            
+            name = os.path.splitext(os.path.basename(path))[0]
+            motion = self._load_motion(path)
+            if motion is None:
+                continue
+
+            total_len = (len(motion) // self.unit_length) * self.unit_length
+            motion = motion[:total_len]
+            motion = (motion - self.mean) / self.std
+
+            try:
+                with cs.open(pjoin(self.text_dir, name + ".txt")) as f:
+                    lines = f.readlines()
+            except FileNotFoundError:
+                continue
+
+            full_text_list = []
+            for line in lines:
+                line_split = line.strip().split("#")
+                caption = line_split[0]
+                f_tag = float(line_split[2])
+                to_tag = float(line_split[3])
+
+                f_tag = 0.0 if np.isnan(f_tag) else f_tag
+                to_tag = 0.0 if np.isnan(to_tag) else to_tag
+
+                if f_tag == 0.0 and to_tag == 0.0:
+                    full_text_list.append(caption)
+                else:
+                    start = int(f_tag * self.fps / self.unit_length)
+                    end = int(to_tag * self.fps / self.unit_length)
+                    if end > start:
+                        motion_segment = motion[start:end]
+                        if motion_segment.shape[0] >= min_len:
+                            self.data_list.append(
+                                {
+                                    "motion": motion_segment.astype(np.float32),
+                                    "text_list": [caption],
+                                }
+                            )
+
+            if full_text_list and motion.shape[0] >= min_len:
+                self.data_list.append(
+                    {
+                        "motion": motion.astype(np.float32),
+                        "text_list": full_text_list,
+                    }
+                )
+
+        if is_main:
+            print(f"[HumanML3D] Loaded {len(self.data_list)} valid samples")
+        
+        # Save to cache for next time
+        self._save_cache(cache_file, "HumanML3D")
+
+    def __getitem__(self, item):
+        for _ in range(10):
+            data = self.data_list[item]
+            motion = data["motion"]
+            motion_len = motion.shape[0]
+            max_step = motion_len - self.pred_len - 1
+            if max_step < 0:
+                item = random.randint(0, len(self.data_list) - 1)
+                continue
+            step_idx = random.randint(0, max_step)
+
+            history = self._build_history_window(motion, step_idx)
+            target = motion[step_idx + 1 : step_idx + 1 + self.pred_len]
+            if target.shape[0] < self.pred_len:
+                item = random.randint(0, len(self.data_list) - 1)
+                continue
+
+            caption = random.choice(data["text_list"]) if data["text_list"] else ""
+            return caption, history.astype(np.float32), target.astype(np.float32)
+
+        raise RuntimeError("Failed to sample valid segment from HumanML3D")
+
+
+class BABELStreamDataset(BaseMotionDataset):
+    """BABEL stream dataset with configurable paths."""
+
+    def __init__(
+        self,
+        data_root,
+        meta_dir,
+        history_len=60,
+        pred_len=5,
+        unit_length=1,
+        fps=50,
+    ):
+        super().__init__(meta_dir, history_len, pred_len, unit_length, fps)
+        
+        self.motion_dir = pjoin(data_root, "train_stream")
+        self.text_dir = pjoin(data_root, "train_stream_text")
+
+        # Try to load from cache first
+        cache_file = self._get_cache_path(data_root, "babel_stream")
+        if self._load_cache(cache_file, "BABEL Stream"):
+            return  # Cache loaded successfully
+
+        # Cache not found, preprocess from scratch
+        file_list = [pjoin(self.motion_dir, f) for f in os.listdir(self.motion_dir) if f.endswith(".npz")]
+        if not file_list:
+            raise FileNotFoundError(f"No npz files found in {self.motion_dir}")
+
+        total_files = len(file_list)
+        # Only print from main process (rank 0) in distributed training
+        is_main = int(os.environ.get("LOCAL_RANK", 0)) == 0
+        if is_main:
+            print(f"[BABEL Stream] Cache not found, preprocessing {total_files} npz files...")
+        min_len = self.pred_len  # Only need at least pred_len frames, history will be 0-padded
+        
+        for idx, path in enumerate(file_list):
+            # Progress every 10%
+            if is_main and idx % (max(1, total_files // 10)) == 0:
+                progress = round((idx / total_files) * 100)
+                print(f"[BABEL Stream] Progress: {progress}% ({idx}/{total_files})")
+            
+            name = os.path.splitext(os.path.basename(path))[0]
+            motion = self._load_motion(path)
+            if motion is None:
+                continue
+
+            total_len = (len(motion) // self.unit_length) * self.unit_length
+            motion = motion[:total_len]
+            motion = (motion - self.mean) / self.std
+
+            try:
+                with cs.open(pjoin(self.text_dir, name + ".txt")) as f:
+                    lines = f.readlines()
+            except FileNotFoundError:
+                continue
+
+            text_schedule, first_segment_len = self._build_babel_schedule(lines, motion.shape[0])
+            if motion.shape[0] >= min_len:
+                self.data_list.append(
+                    {
+                        "motion": motion.astype(np.float32),
+                        "text_schedule": text_schedule,
+                        "first_segment_len": first_segment_len,
+                    }
+                )
+
+        if is_main:
+            print(f"[BABEL Stream] Loaded {len(self.data_list)} valid samples")
+        
+        # Save to cache for next time
+        self._save_cache(cache_file, "BABEL Stream")
+
+    def _build_babel_schedule(self, lines, total_len):
+        """Build text schedule from BABEL stream format."""
+        segments = []
+        first_segment_len = 0
+        last_b_caption = None
+        total_used = 0
+
+        for line in lines:
+            if "*" not in line:
+                continue
+            left, right = line.strip().split("*", 1)
+            a_caption = left.split("#")[0].strip()
+            right_split = right.split("#")
+            b_caption = right_split[0].strip()
+            a_len_str = right_split[-1]
+            try:
+                a_token_len = int(float(a_len_str)) // self.unit_length
+            except ValueError:
+                continue
+            if a_token_len <= 0:
+                continue
+            if not segments:
+                first_segment_len = a_token_len
+            segments.append((a_caption, a_token_len))
+            last_b_caption = b_caption if b_caption != "" else last_b_caption
+            total_used += a_token_len
+
+        if total_used < total_len:
+            if last_b_caption is None and segments:
+                last_b_caption = segments[-1][0]
+            if last_b_caption is None:
+                last_b_caption = ""
+            segments.append((last_b_caption, total_len - total_used))
+
+        schedule = []
+        end_idx = 0
+        for caption, length in segments:
+            if length <= 0:
+                continue
+            end_idx += length
+            schedule.append((caption, end_idx))
+
+        if not schedule:
+            schedule = [("", total_len)]
+
+        return schedule, first_segment_len
+
+    def _caption_from_schedule(self, schedule, step_idx):
+        """Get caption for a specific frame index."""
+        for caption, end_idx in schedule:
+            if step_idx < end_idx:
+                return caption
+        return schedule[-1][0] if schedule else ""
+
+    def __getitem__(self, item):
+        for _ in range(10):
+            data = self.data_list[item]
+            motion = data["motion"]
+            motion_len = motion.shape[0]
+            min_step = int(data["first_segment_len"])
+            max_step = motion_len - self.pred_len - 1
+            if min_step > max_step:
+                item = random.randint(0, len(self.data_list) - 1)
+                continue
+            step_idx = random.randint(min_step, max_step)
+
+            history = self._build_history_window(motion, step_idx)
+            target = motion[step_idx + 1 : step_idx + 1 + self.pred_len]
+            if target.shape[0] < self.pred_len:
+                item = random.randint(0, len(self.data_list) - 1)
+                continue
+
+            caption = self._caption_from_schedule(data["text_schedule"], step_idx)
+            return caption, history.astype(np.float32), target.astype(np.float32)
+
+        raise RuntimeError("Failed to sample valid segment from BABEL Stream")
+
+
+class HumanML3DStreamDataset(BaseMotionDataset):
+    """HumanML3D stream dataset with configurable paths."""
+
+    def __init__(
+        self,
+        data_root,
+        meta_dir,
+        history_len=60,
+        pred_len=5,
+        unit_length=1,
+        fps=50,
+    ):
+        super().__init__(meta_dir, history_len, pred_len, unit_length, fps)
+        
+        self.motion_dir = pjoin(data_root, "train_stream")
+        self.text_dir = pjoin(data_root, "train_stream_text")
+
+        # Try to load from cache first
+        cache_file = self._get_cache_path(data_root, "humanml3d_stream")
+        if self._load_cache(cache_file, "HumanML3D Stream"):
+            return  # Cache loaded successfully
+
+        # Cache not found, preprocess from scratch
+        file_list = [pjoin(self.motion_dir, f) for f in os.listdir(self.motion_dir) if f.endswith(".npz")]
+        if not file_list:
+            raise FileNotFoundError(f"No npz files found in {self.motion_dir}")
+
+        total_files = len(file_list)
+        # Only print from main process (rank 0) in distributed training
+        is_main = int(os.environ.get("LOCAL_RANK", 0)) == 0
+        if is_main:
+            print(f"[HumanML3D Stream] Cache not found, preprocessing {total_files} npz files...")
+        min_len = self.pred_len  # Only need at least pred_len frames, history will be 0-padded
+        
+        for idx, path in enumerate(file_list):
+            # Progress every 10%
+            if is_main and idx % (max(1, total_files // 10)) == 0:
+                progress = round((idx / total_files) * 100)
+                print(f"[HumanML3D Stream] Progress: {progress}% ({idx}/{total_files})")
+            
+            name = os.path.splitext(os.path.basename(path))[0]
+            motion = self._load_motion(path)
+            if motion is None:
+                continue
+
+            total_len = (len(motion) // self.unit_length) * self.unit_length
+            motion = motion[:total_len]
+            motion = (motion - self.mean) / self.std
+
+            # Map seq_h_* -> seq_* for text file
+            text_name = name
+            if name.startswith("seq_h_"):
+                text_name = "seq_" + name.split("seq_h_", 1)[1]
+
+            try:
+                with cs.open(pjoin(self.text_dir, text_name + ".txt")) as f:
+                    lines = f.readlines()
+            except FileNotFoundError:
+                continue
+
+            text_schedule, first_segment_len = self._build_babel_schedule(lines, motion.shape[0])
+            if motion.shape[0] >= min_len:
+                self.data_list.append(
+                    {
+                        "motion": motion.astype(np.float32),
+                        "text_schedule": text_schedule,
+                        "first_segment_len": first_segment_len,
+                    }
+                )
+
+        if is_main:
+            print(f"[HumanML3D Stream] Loaded {len(self.data_list)} valid samples")
+        
+        # Save to cache for next time
+        self._save_cache(cache_file, "HumanML3D Stream")
+
+    def _build_babel_schedule(self, lines, total_len):
+        """Build text schedule from stream format."""
+        segments = []
+        first_segment_len = 0
+        last_b_caption = None
+        total_used = 0
+
+        for line in lines:
+            if "*" not in line:
+                continue
+            left, right = line.strip().split("*", 1)
+            a_caption = left.split("#")[0].strip()
+            right_split = right.split("#")
+            b_caption = right_split[0].strip()
+            a_len_str = right_split[-1]
+            try:
+                a_token_len = int(float(a_len_str)) // self.unit_length
+            except ValueError:
+                continue
+            if a_token_len <= 0:
+                continue
+            if not segments:
+                first_segment_len = a_token_len
+            segments.append((a_caption, a_token_len))
+            last_b_caption = b_caption if b_caption != "" else last_b_caption
+            total_used += a_token_len
+
+        if total_used < total_len:
+            if last_b_caption is None and segments:
+                last_b_caption = segments[-1][0]
+            if last_b_caption is None:
+                last_b_caption = ""
+            segments.append((last_b_caption, total_len - total_used))
+
+        schedule = []
+        end_idx = 0
+        for caption, length in segments:
+            if length <= 0:
+                continue
+            end_idx += length
+            schedule.append((caption, end_idx))
+
+        if not schedule:
+            schedule = [("", total_len)]
+
+        return schedule, first_segment_len
+
+    def _caption_from_schedule(self, schedule, step_idx):
+        """Get caption for a specific frame index."""
+        for caption, end_idx in schedule:
+            if step_idx < end_idx:
+                return caption
+        return schedule[-1][0] if schedule else ""
+
+    def __getitem__(self, item):
+        for _ in range(10):
+            data = self.data_list[item]
+            motion = data["motion"]
+            motion_len = motion.shape[0]
+            min_step = int(data["first_segment_len"])
+            max_step = motion_len - self.pred_len - 1
+            if min_step > max_step:
+                item = random.randint(0, len(self.data_list) - 1)
+                continue
+            step_idx = random.randint(min_step, max_step)
+
+            history = self._build_history_window(motion, step_idx)
+            target = motion[step_idx + 1 : step_idx + 1 + self.pred_len]
+            if target.shape[0] < self.pred_len:
+                item = random.randint(0, len(self.data_list) - 1)
+                continue
+
+            caption = self._caption_from_schedule(data["text_schedule"], step_idx)
+            return caption, history.astype(np.float32), target.astype(np.float32)
+
+        raise RuntimeError("Failed to sample valid segment from HumanML3D Stream")
+
+
+def get_dataloader(
+    datasets,
+    dataset_paths,
+    meta_dir,
+    batch_size=256,
+    num_workers=8,
+    history_len=60,
+    pred_len=5,
+    unit_length=1,
+    fps=50,
+):
+    """
+    Create dataloader from one or multiple datasets.
+    
+    Args:
+        datasets: list of dataset names, e.g. ["humanml3d", "babel_stream"]
+        dataset_paths: dict mapping dataset name to data root path
+        meta_dir: path to statistics directory (Mean.npy, Std.npy)
+        batch_size: batch size
+        num_workers: dataloader workers
+        history_len: history window length
+        pred_len: prediction window length
+        unit_length: unit length for downsampling
+        fps: frames per second
+    
+    Returns:
+        DataLoader instance
+    """
+    dataset_classes = {
+        "humanml3d": HumanML3DDataset,
+        "babel_stream": BABELStreamDataset,
+        "humanml3d_stream": HumanML3DStreamDataset,
+    }
+
+    if isinstance(datasets, str):
+        datasets = [datasets]
+
+    all_datasets = []
+    for ds_name in datasets:
+        if ds_name not in dataset_classes:
+            raise ValueError(f"Unknown dataset: {ds_name}. Choose from {list(dataset_classes.keys())}")
+        if ds_name not in dataset_paths:
+            raise ValueError(f"Missing path for dataset: {ds_name}")
+        
+        ds_class = dataset_classes[ds_name]
+        all_datasets.append(
+            ds_class(
+                data_root=dataset_paths[ds_name],
+                meta_dir=meta_dir,
+                history_len=history_len,
+                pred_len=pred_len,
+                unit_length=unit_length,
+                fps=fps,
+            )
+        )
+
+    if len(all_datasets) == 1:
+        combined_dataset = all_datasets[0]
+    else:
+        combined_dataset = torch.utils.data.ConcatDataset(all_datasets)
+
+    loader = torch.utils.data.DataLoader(
+        combined_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        drop_last=True,
+        persistent_workers=True if num_workers > 0 else False,  # Keep workers alive to avoid NFS temp file errors
+        pin_memory=True,  # Speed up GPU transfer
+    )
+    return loader
+
+
+def cycle(iterable):
+    """Infinite iterator over dataloader."""
+    while True:
+        for x in iterable:
+            yield x

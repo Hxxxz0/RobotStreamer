@@ -1,0 +1,37 @@
+# Training outputs and logs
+outputs/
+logs/
+nohup.out
+
+# Cache and temporary directories (to avoid /tmp and /root)
+.tmp/
+.cache/
+
+# External dependencies (keep README only)
+external/*
+!external/README.md
+
+# Text encoders (keep README only)
+text_encoders/*
+!text_encoders/README.md
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Jupyter
+.ipynb_checkpoints
+
+# Environment
+.env
+venv/
+env/

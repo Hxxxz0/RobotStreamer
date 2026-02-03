@@ -1,0 +1,51 @@
+# MotionDiffusionCore Default Configuration
+
+# Datasets (choose from: humanml3d, babel_stream, humanml3d_stream)
+datasets:
+  - humanml3d
+  - babel_stream
+  - humanml3d_stream
+
+# Dataset paths (configurable, no hardcoding in code)
+# Dataset paths
+humanml3d_path: /limx_embap/tos/user/Jensen/dataset/robot_humanml_data
+babel_stream_path: /limx_embap/tos/user/Jensen/project/dataset/babel_stream_50
+humanml3d_stream_path: /limx_embap/tos/user/Jensen/project/dataset/humanml3d_stream_50
+meta_dir: /limx_embap/tos/user/Jensen/project/dataset/statistics
+
+# Data loading
+batch_size: 256
+num_workers: 8
+
+# Training
+total_iter: 100000
+lr: 1e-4
+weight_decay: 0.0
+seed: 123
+
+# Model
+motion_dim: 38
+hidden_size: 512
+latent_dim: 16
+num_diffusion_head_layers: 4
+history_len: 60
+pred_len: 5
+
+# Diffusion config
+num_sampling_steps: 10          # DDIM inference steps (10 = fast, 50 = high quality)
+num_train_timesteps: 1000       # Training diffusion steps
+beta_schedule: squaredcos_cap_v2  # Noise schedule: linear, scaled_linear, squaredcos_cap_v2
+prediction_type: sample         # Model predicts: "sample" (x0) or "epsilon" (noise)
+diffusion_width: 512           # Diffusion head hidden dimension
+grad_checkpointing: false      # Enable to save memory during training
+
+# Text Encoder
+text_encoder_type: t5  # or bge
+text_encoder: ""  # empty = use default (google/flan-t5-small or BAAI/bge-small-en-v1.5)
+text_encoder_device: cuda
+
+# Paths
+mean_std_dir: /limx_embap/tos/user/Jensen/project/dataset/statistics
+
+# Output
+exp_name: motion_diff
