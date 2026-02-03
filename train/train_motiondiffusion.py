@@ -251,6 +251,12 @@ def main():
     text_encoder, model, optimizer, train_loader = accelerator.prepare(
         text_encoder, model, optimizer, train_loader
     )
+    
+    # Ensure text encoder stays in eval mode (critical for stable text encoding)
+    text_encoder.eval()
+    for param in text_encoder.parameters():
+        param.requires_grad = False
+    
     train_loader_iter = cycle(train_loader)
 
     avg_loss = 0.0
@@ -262,11 +268,11 @@ def main():
         target = target.to(device).float()
 
         bs = len(caption)
-        num_masked = int(bs * 0.1)
-        if num_masked > 0:
-            mask_indices = random.sample(range(bs), num_masked)
-            for idx in mask_indices:
-                caption[idx] = ""
+        # Ensure at least 1 sample is masked for CFG training (10% or minimum 1)
+        num_masked = max(1, int(bs * 0.1))
+        mask_indices = random.sample(range(bs), num_masked)
+        for idx in mask_indices:
+            caption[idx] = ""
 
         unwrapped_text_encoder = accelerator.unwrap_model(text_encoder)
         feat_text = torch.from_numpy(unwrapped_text_encoder.encode(caption)).float()

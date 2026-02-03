@@ -135,8 +135,8 @@ class MotionDiffusionModel(nn.Module):
         Args:
             history: (B, history_len, input_dim) - Historical motion frames
             feat_text: (B, text_encoder_dim) - Text condition features
-            cfg_scale: CFG guidance scale (1.0 = no guidance, >1.0 = stronger text conditioning)
-            empty_feat_text: (B, text_encoder_dim) - Empty text features for CFG (required if cfg_scale > 1.0)
+            cfg_scale: CFG guidance scale (1.0 = no guidance, !=1.0 = use CFG)
+            empty_feat_text: (B, text_encoder_dim) - Empty text features for CFG (required if cfg_scale != 1.0)
         
         Returns:
             pred_motion: (B, pred_len, input_dim) - Predicted future motion
@@ -147,10 +147,10 @@ class MotionDiffusionModel(nn.Module):
             conditions = self.trans_encoder(history_tokens, feat_text)
             z = conditions[:, -1, :]
             
-            # Apply CFG if requested
-            if cfg_scale > 1.0:
+            # Apply CFG if requested (consistent with diffloss.py)
+            if cfg_scale != 1.0:
                 if empty_feat_text is None:
-                    raise ValueError("empty_feat_text is required when cfg_scale > 1.0")
+                    raise ValueError("empty_feat_text is required when cfg_scale != 1.0")
                 # Get unconditional condition vector
                 empty_conditions = self.trans_encoder(history_tokens, empty_feat_text)
                 empty_z = empty_conditions[:, -1, :]

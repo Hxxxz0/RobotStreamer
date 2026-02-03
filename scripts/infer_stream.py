@@ -60,7 +60,7 @@ def main():
     parser.add_argument("--diffusion_width", type=int, default=512, help="Diffusion head hidden dim")
     
     # Sampling config
-    parser.add_argument("--cfg", type=float, default=1.0, help="Classifier-free guidance scale")
+    parser.add_argument("--cfg", type=float, default=7.5, help="Classifier-free guidance scale (1.0=off, 7.5=recommended)")
     parser.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature")
     parser.add_argument("--max_motion_length", type=int, default=150, help="Total frames to generate")
     parser.add_argument("--fps", type=int, default=50, help="FPS for output")
