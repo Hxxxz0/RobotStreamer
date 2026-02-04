@@ -5,10 +5,11 @@ python scripts/infer_stream.py \
   --ckpt outputs/motion_diff/latest.pth \
   --mean /limx_embap/tos/user/Jensen/project/dataset/statistics/Mean.npy \
   --std /limx_embap/tos/user/Jensen/project/dataset/statistics/Std.npy \
-  --text "A person walks forward slowly." \
-  --max_motion_length 100 \
+  --text "A person walks forward." \
+  --max_motion_length 500 \
   --num_sampling_steps 10 \
-  --cfg 2.0 \
+  --cfg 2.5 \
+  --temperature 0.5 \
   --out_dir outputs/infer_test
 
 

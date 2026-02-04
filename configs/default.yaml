@@ -18,7 +18,7 @@ batch_size: 256
 num_workers: 8
 
 # Training
-total_iter: 100000
+total_iter: 200000
 lr: 1e-4
 weight_decay: 0.0
 seed: 123

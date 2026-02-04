@@ -246,8 +246,6 @@ def main():
 
     scheduler = WarmupCosineScheduler(optimizer, args.total_iter // 10, args.total_iter)
 
-    scheduler = WarmupCosineScheduler(optimizer, args.total_iter // 10, args.total_iter)
-
     text_encoder, model, optimizer, train_loader = accelerator.prepare(
         text_encoder, model, optimizer, train_loader
     )

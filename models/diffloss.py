@@ -107,7 +107,13 @@ class DiffLoss(nn.Module):
 
         loss = F.mse_loss(model_output, target_loss, reduction='none')
         if mask is not None:
-            loss = (loss * mask).sum() / mask.sum()
+            # Ensure mask broadcasts correctly with loss
+            # mask: [B] or [B, 1] -> expand to match loss shape [B, D]
+            while mask.ndim < loss.ndim:
+                mask = mask.unsqueeze(-1)
+            # Normalize by number of valid elements (not just frames)
+            loss = (loss * mask).sum() / mask.sum().clamp_min(1.0)
+            return loss, model_output
         
         return loss.mean(), model_output
 
@@ -301,19 +307,30 @@ class SimpleMLPAdaLN(nn.Module):
             cfg_scale: guidance scale
         
         Returns:
-            pred_x0: [B, D] - guided prediction
+            pred: [B, D] - guided prediction (and variance if learn_sigma=True)
         """
         # Duplicate input for both conditional and unconditional paths
         x_combined = torch.cat([x, x], dim=0)  # [2B, D]
         
         # Forward pass for both paths
-        model_out = self.forward(x_combined, t, c)
-        pred_x0, rest = model_out[:, : self.in_channels], model_out[:, self.in_channels :]
+        model_out = self.forward(x_combined, t, c)  # [2B, out_channels]
         
-        # Split predictions
-        cond_pred, uncond_pred = torch.split(pred_x0, len(pred_x0) // 2, dim=0)
+        # Split conditional and unconditional outputs
+        cond_out, uncond_out = torch.split(model_out, len(model_out) // 2, dim=0)
         
-        # Apply CFG: pred = uncond + scale * (cond - uncond)
-        guided_pred = uncond_pred + cfg_scale * (cond_pred - uncond_pred)
+        # Apply CFG only to main prediction (not variance)
+        if model_out.shape[1] == self.in_channels * 2:  # learn_sigma=True
+            # Separate prediction and variance
+            cond_pred, cond_var = cond_out[:, :self.in_channels], cond_out[:, self.in_channels:]
+            uncond_pred, uncond_var = uncond_out[:, :self.in_channels], uncond_out[:, self.in_channels:]
+            
+            # Apply CFG only to prediction
+            guided_pred = uncond_pred + cfg_scale * (cond_pred - uncond_pred)
+            
+            # Use unconditional variance (more stable than guiding variance)
+            guided_out = torch.cat([guided_pred, uncond_var], dim=1)
+        else:  # learn_sigma=False (current default)
+            # Apply CFG to entire output
+            guided_out = uncond_out + cfg_scale * (cond_out - uncond_out)
         
-        return torch.cat([guided_pred, rest[:len(rest)//2]], dim=1)
+        return guided_out

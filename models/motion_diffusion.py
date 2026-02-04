@@ -128,7 +128,7 @@ class MotionDiffusionModel(nn.Module):
         loss, pred = self.action_diffusion(target_flat, z)
         return loss, pred
 
-    def predict(self, history, feat_text, cfg_scale=1.0, empty_feat_text=None):
+    def predict(self, history, feat_text, cfg_scale=1.0, empty_feat_text=None, temperature=1.0):
         """
         Inference with Classifier-Free Guidance.
         
@@ -137,6 +137,7 @@ class MotionDiffusionModel(nn.Module):
             feat_text: (B, text_encoder_dim) - Text condition features
             cfg_scale: CFG guidance scale (1.0 = no guidance, !=1.0 = use CFG)
             empty_feat_text: (B, text_encoder_dim) - Empty text features for CFG (required if cfg_scale != 1.0)
+            temperature: Sampling temperature for noise scaling (default: 1.0)
         
         Returns:
             pred_motion: (B, pred_len, input_dim) - Predicted future motion
@@ -158,7 +159,7 @@ class MotionDiffusionModel(nn.Module):
                 z = torch.cat([z, empty_z], dim=0)
             
             # Sample using the diffusion model
-            pred_flat = self.action_diffusion.sample(z, cfg=cfg_scale)  # (B, 190)
+            pred_flat = self.action_diffusion.sample(z, temperature=temperature, cfg=cfg_scale)  # (B, 190)
             pred_motion = pred_flat.reshape(-1, self.pred_len, self.input_dim)  # (B, 5, 38)
             
         return pred_motion

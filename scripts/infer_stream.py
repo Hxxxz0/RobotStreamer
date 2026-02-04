@@ -176,7 +176,8 @@ def main():
                 history_tensor, 
                 feat_text, 
                 cfg_scale=args.cfg, 
-                empty_feat_text=empty_feat
+                empty_feat_text=empty_feat,
+                temperature=args.temperature
             )
 
             pred = pred_tensor.squeeze(0).cpu().numpy() # (5, 38)
