@@ -142,6 +142,10 @@ def parse_args():
     parser.add_argument("--prediction_type", type=str, default=config.get("prediction_type", "sample"),
                         choices=["sample", "epsilon", "v_prediction"])
     parser.add_argument("--diffusion_width", type=int, default=config.get("diffusion_width", 512))
+    
+    # Classifier-Free Guidance
+    parser.add_argument("--cfg_mask_prob", type=float, default=config.get("cfg_mask_prob", 0.0),
+                        help="Probability of masking text during training (0.0=no CFG, 0.1=10%% masking)")
     parser.add_argument("--grad_checkpointing", type=bool, default=config.get("grad_checkpointing", False))
     
     # Text encoder
@@ -257,6 +261,13 @@ def main():
     
     train_loader_iter = cycle(train_loader)
 
+    # Log CFG configuration
+    if accelerator.is_main_process:
+        if args.cfg_mask_prob > 0.0:
+            logger.info(f"CFG enabled: masking {args.cfg_mask_prob*100:.1f}% of captions during training")
+        else:
+            logger.info("CFG disabled: training without caption masking (following Pi0's approach)")
+
     avg_loss = 0.0
     while nb_iter <= args.total_iter:
         batch = next(train_loader_iter)
@@ -266,11 +277,14 @@ def main():
         target = target.to(device).float()
 
         bs = len(caption)
-        # Ensure at least 1 sample is masked for CFG training (10% or minimum 1)
-        num_masked = max(1, int(bs * 0.1))
-        mask_indices = random.sample(range(bs), num_masked)
-        for idx in mask_indices:
-            caption[idx] = ""
+        # Classifier-Free Guidance: mask captions based on cfg_mask_prob
+        # cfg_mask_prob = 0.0: no masking (follows Pi0's approach)
+        # cfg_mask_prob > 0.0: mask captions for CFG training
+        if args.cfg_mask_prob > 0.0:
+            num_masked = max(1, int(bs * args.cfg_mask_prob))
+            mask_indices = random.sample(range(bs), num_masked)
+            for idx in mask_indices:
+                caption[idx] = ""
 
         unwrapped_text_encoder = accelerator.unwrap_model(text_encoder)
         feat_text = torch.from_numpy(unwrapped_text_encoder.encode(caption)).float()

@@ -149,12 +149,15 @@ class BaseMotionDataset(data.Dataset):
         return motion
 
     def _build_history_window(self, motion, step_idx):
-        """Build history window with zero-padding if needed."""
+        """Build history window with first-frame padding if needed."""
         start = max(0, step_idx - self.history_len + 1)
         history = motion[start : step_idx + 1]
         if history.shape[0] < self.history_len:
             pad_count = self.history_len - history.shape[0]
-            pad = np.zeros((pad_count, motion.shape[1]), dtype=motion.dtype)
+            # Use first frame for padding instead of zeros
+            # This represents "static pose at start" rather than "mean pose"
+            first_frame = history[0:1]  # Keep dims: [1, D]
+            pad = np.repeat(first_frame, pad_count, axis=0)  # [pad_count, D]
             history = np.concatenate([pad, history], axis=0)
         return history
 

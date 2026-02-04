@@ -39,6 +39,11 @@ prediction_type: sample         # Model predicts: "sample" (x0) or "epsilon" (no
 diffusion_width: 512           # Diffusion head hidden dimension
 grad_checkpointing: false      # Enable to save memory during training
 
+# Classifier-Free Guidance (CFG)
+cfg_mask_prob: 0.0             # Probability of masking text during training (0.0 = no CFG, 0.1 = 10% masking)
+                                # Set to 0.0 to follow Pi0's approach (no CFG training)
+                                # Set to 0.1 to enable CFG for stronger text control
+
 # Text Encoder
 text_encoder_type: t5  # or bge
 text_encoder: ""  # empty = use default (google/flan-t5-small or BAAI/bge-small-en-v1.5)
