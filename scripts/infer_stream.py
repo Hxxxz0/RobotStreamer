@@ -66,7 +66,11 @@ def main():
     parser.add_argument("--pred_len", type=int, default=5)
     parser.add_argument("--latent_dim", type=int, default=16)
     parser.add_argument("--hidden_size", type=int, default=512)
-    parser.add_argument("--num_diffusion_head_layers", type=int, default=4)
+    
+    # Transformer encoder-decoder
+    parser.add_argument("--n_decoder_layers", type=int, default=6)
+    parser.add_argument("--n_encoder_layers", type=int, default=4)
+    parser.add_argument("--n_heads", type=int, default=8)
     
     # Diffusion config
     parser.add_argument("--num_sampling_steps", type=int, default=10, help="DDIM sampling steps (10=fast, 50=quality)")
@@ -103,7 +107,8 @@ def main():
         ckpt_args = ckpt["args"]
         # Whitelist of args to overwrite from checkpoint
         model_keys = [
-            "motion_dim", "hidden_size", "latent_dim", "num_diffusion_head_layers", 
+            "motion_dim", "hidden_size", "latent_dim", 
+            "n_decoder_layers", "n_encoder_layers", "n_heads",
             "history_len", "pred_len", "diffusion_width", "prediction_type", "beta_schedule",
             "num_train_timesteps"
         ]
@@ -136,7 +141,6 @@ def main():
         hidden_size=args.hidden_size,
         latent_dim=args.latent_dim,
         text_encoder_dim=text_encoder_dim,
-        num_diffusion_head_layers=args.num_diffusion_head_layers,
         history_len=args.history_len,
         pred_len=args.pred_len,
         device=device,
@@ -145,16 +149,18 @@ def main():
         beta_schedule=args.beta_schedule,
         prediction_type=args.prediction_type,
         diffusion_width=args.diffusion_width,
+        n_decoder_layers=args.n_decoder_layers,
+        n_encoder_layers=args.n_encoder_layers,
+        n_heads=args.n_heads,
     ).to(device)
     
     # Load weights
-    # Map checkpoint keys to model keys
+    # New architecture: no trans_encoder, only token_mlp and action_diffusion
     model_state = model.state_dict()
     loaded_state = {}
     
-    # Checkpoint structure: {"trans": ..., "token_mlp": ..., "action_diffusion": ...}
+    # Checkpoint structure: {"token_mlp": ..., "action_diffusion": ...}
     key_mapping = {
-        "trans": "trans_encoder",
         "token_mlp": "token_mlp",
         "action_diffusion": "action_diffusion"
     }

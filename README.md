@@ -1,6 +1,6 @@
 # MotionDiffusionCore
 
-基于 **Transformer Decoder + Diffusion Head** 的流式动作生成模型，用于机器人动作预测和生成。
+基于 **Transformer 编码器-解码器扩散** 的流式动作生成模型，用于机器人动作预测和生成。
 
 ---
 
@@ -8,11 +8,12 @@
 
 MotionDiffusionCore 是一个用于机器人动作序列生成的深度学习框架。该项目采用：
 - **历史动作编码**：通过 MLP 将 60 帧历史动作映射为 token 序列
-- **文本条件融合**：使用 Transformer Decoder 融合历史 token 和文本描述
-- **扩散生成**：基于 Transformer 输出的条件向量，通过扩散模型一次性生成未来 5 帧动作
+- **统一的 Transformer 编码器-解码器**：在扩散头中融合时间步、历史和文本条件
+- **扩散生成**：通过 Transformer 解码器直接生成未来 5 帧动作序列
 
 **核心特点**：
 - ✅ 无需 VAE/TAE 等重型编码器，直接端到端训练
+- ✅ 统一的编码器-解码器架构，更强的序列建模能力
 - ✅ 支持任意长度的流式生成（滚动预测）
 - ✅ 支持 Classifier-Free Guidance (CFG) 控制生成质量
 - ✅ 三个独立数据集，可灵活组合训练
@@ -33,18 +34,21 @@ MotionDiffusionCore 是一个用于机器人动作序列生成的深度学习框
          60个 16维 token
                 ↓
     ┌───────────────────────────────┐
-    │  LLaMAHF Transformer Decoder  │  ← 融合历史+文本
-    │  - Causal Self-Attention      │
-    │  - RoPE 位置编码               │
-    │  - QK-Norm 稳定训练            │
-    │  - RMSNorm 归一化              │
-    └───────────────────────────────┘
-                ↓
-           条件向量 z (512D)
-                ↓
-    ┌───────────────────────────────┐
-    │  DiffLoss (Diffusion Head)    │  ← 扩散生成
-    │  - AdaLN MLP                  │
+    │  Transformer 编码器-解码器      │  ← 扩散头
+    │                               │
+    │  [编码器 - 4层]                │
+    │  输入: timestep(1) +           │
+    │        history_tokens(60) +    │
+    │        text(1) = 62 tokens     │
+    │         ↓                      │
+    │  输出: memory (62, 512)        │
+    │         ↓                      │
+    │  [解码器 - 6层]                │
+    │  输入: noisy_samples (5, 38)   │
+    │  交叉注意力: ← memory          │
+    │         ↓                      │
+    │  输出: denoised (5, 38)        │
+    │                               │
     │  - DDIM 快速采样（默认10步）     │
     │  - Squared Cosine 噪声调度     │
     └───────────────────────────────┘
@@ -60,27 +64,34 @@ MotionDiffusionCore 是一个用于机器人动作序列生成的深度学习框
 - **结构**：两层 MLP (38 → 512 → 16)
 - **作用**：将原始动作映射到 Transformer 可处理的 token 空间
 
-#### 2. **LLaMAHF Transformer** (`models/transformer.py`)
-- **输入**：
-  - 60 个历史 token (16D each)
-  - 1 个文本条件向量 (T5: 512D / BGE: 1024D)
-- **输出**：61 个上下文向量，取最后一个作为条件 z
-- **特性**：
-  - **RoPE (Rotary Position Embedding)**：相对位置编码，支持任意长度外推
-  - **QK-Norm**：Query/Key 归一化，提升训练稳定性
-  - **Causal Mask**：自回归掩码，确保因果关系
-  - **RMSNorm**：替代 LayerNorm，减少计算量
+#### 2. **Transformer 编码器-解码器** (`models/transformer_diffusion.py`)
 
-#### 3. **DiffLoss (Diffusion Head)** (`models/diffloss.py`)
+**编码器部分**（4 层，可配置）：
 - **输入**：
-  - 目标动作序列 (5×38=190D)
-  - 条件向量 z (512D)
-- **输出**：生成的 5 帧动作
+  - 时间步嵌入 (1, 512D)
+  - 60 个历史 token (60, 16D)
+  - 文本条件向量 (1, 512D/1024D)
+  - 总计：62 个 token
+- **输出**：memory 向量 (62, 512D)
+- **作用**：双向融合所有条件信息
+
+**解码器部分**（6 层，可配置）：
+- **输入**：
+  - 带噪声的动作样本 (5, 38D)
+  - 交叉注意力到编码器 memory
+- **输出**：去噪后的动作 (5, 38D)
+- **作用**：通过交叉注意力机制，让每一帧都能关注历史的不同部分
+
+**架构优势**：
+- ✅ **更强的条件融合**：编码器可对所有条件进行双向注意力
+- ✅ **更好的序列建模**：解码器将 5 帧作为序列处理，而非展平
+- ✅ **灵活扩展**：易于添加新的条件（如目标、约束）
+
+#### 3. **扩散过程** (`models/diffloss.py`)
 - **训练**：使用 DDPM 学习从高斯噪声逐步去噪到目标动作（1000 步）
 - **推理**：使用 DDIM 快速采样（默认 10 步，可配置 50 步以提升质量）
 - **特性**：
-  - **AdaLN (Adaptive Layer Normalization)**：条件向量 z 调制网络参数
-  - **Timestep Embedding**：将扩散时间步嵌入到网络
+  - **Timestep Embedding**：将扩散时间步嵌入到编码器
   - **Squared Cosine Cap V2 Schedule**：改进的噪声调度，训练更稳定
   - **HuggingFace Diffusers 框架**：基于标准库实现，支持多种噪声调度和采样策略
 
@@ -184,8 +195,9 @@ MotionDiffusionCore 是一个用于机器人动作序列生成的深度学习框
   ```
 
 #### **4. 文本条件 Masking（CFG 训练）**
-- 每个 batch 随机将 **10% 的样本文本置空**（`caption = ""`）
-- 训练模型学习无条件生成，用于推理时的 Classifier-Free Guidance
+- 默认关闭（`cfg_mask_prob=0.0`），遵循 Pi0 的方法
+- 可选启用：设置 `cfg_mask_prob=0.1`，随机将 10% 的样本文本置空（`caption = ""`）
+- 作用：训练模型学习无条件生成，用于推理时的 Classifier-Free Guidance
 
 ---
 
@@ -249,6 +261,16 @@ accelerate launch --mixed_precision no --num_processes 4 \
   --meta_dir /path/to/custom/statistics
 ```
 
+**启用 CFG 训练：**
+```bash
+accelerate launch --mixed_precision no --num_processes 4 \
+  train/train_motiondiffusion.py \
+  --config configs/default.yaml \
+  --cfg_mask_prob 0.1 \
+  --exp_name motion_diff_cfg
+# 10% 概率遮罩文本，训练无条件分支以支持更强的 CFG
+```
+
 ### 训练参数说明
 
 #### 数据集参数
@@ -272,10 +294,12 @@ accelerate launch --mixed_precision no --num_processes 4 \
 #### 模型参数
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--hidden_size` | 512 | Transformer 隐藏层维度 |
+| `--hidden_size` | 512 | Token MLP 隐藏层维度 |
 | `--latent_dim` | 16 | 动作 token 维度 |
-| `--num_diffusion_head_layers` | 4 | 扩散头层数 |
 | `--motion_dim` | 38 | 动作维度 |
+| `--n_decoder_layers` | 6 | Transformer 解码器层数 |
+| `--n_encoder_layers` | 4 | Transformer 编码器层数 |
+| `--n_heads` | 8 | 注意力头数 |
 
 #### 扩散模型参数
 | 参数 | 默认值 | 说明 |
@@ -284,8 +308,9 @@ accelerate launch --mixed_precision no --num_processes 4 \
 | `--num_train_timesteps` | 1000 | 训练时扩散总步数 |
 | `--beta_schedule` | `squaredcos_cap_v2` | 噪声调度类型（linear/scaled_linear/squaredcos_cap_v2） |
 | `--prediction_type` | `sample` | 模型预测目标：`sample`(x0) 或 `epsilon`(噪声) |
-| `--diffusion_width` | 512 | 扩散头隐藏层维度 |
+| `--diffusion_width` | 512 | 扩散头 Transformer 维度 |
 | `--grad_checkpointing` | false | 梯度检查点（节省显存） |
+| `--cfg_mask_prob` | 0.0 | CFG 训练时文本遮罩概率（0.0=关闭，0.1=10%遮罩） |
 
 #### 文本编码器参数
 | 参数 | 默认值 | 说明 |
@@ -369,12 +394,12 @@ python scripts/infer_stream.py \
   --mean /limx_embap/tos/user/Jensen/project/dataset/statistics/Mean.npy \
   --std /limx_embap/tos/user/Jensen/project/dataset/statistics/Std.npy \
   --text "机器人向左转" \
-  --cfg 1.5 \
+  --cfg 7.5 \
   --temperature 1.0 \
   --out_dir infer_output
 ```
 
-### 高质量推理（50步采样）
+### 高质量推理（50步采样 + 强 CFG）
 
 ```bash
 python scripts/infer_stream.py \
@@ -383,7 +408,7 @@ python scripts/infer_stream.py \
   --std /limx_embap/tos/user/Jensen/project/dataset/statistics/Std.npy \
   --text "机器人跳跃" \
   --num_sampling_steps 50 \
-  --cfg 2.0 \
+  --cfg 7.5 \
   --out_dir infer_output
 ```
 
@@ -400,14 +425,17 @@ python scripts/infer_stream.py \
 | `--std` | ✅ | - | 归一化标准差文件 |
 | `--text` | ✅ | - | 文本描述（中英文均可） |
 | `--history_npy` | ❌ | None | 历史动作 (N, 38)，不提供则从零开始 |
-| `--max_motion_length` | ❌ | 100 | 最大生成长度 |
-| `--cfg` | ❌ | 1.0 | CFG 引导强度（>1.0 增强文本一致性） |
+| `--max_motion_length` | ❌ | 150 | 最大生成长度 |
+| `--cfg` | ❌ | 7.5 | CFG 引导强度（1.0=关闭，7.5=推荐，>1.0 增强文本一致性） |
 | `--temperature` | ❌ | 1.0 | 扩散温度（>1.0 增加随机性） |
 | `--num_sampling_steps` | ❌ | 10 | DDIM 采样步数（10=快速，50=高质量） |
 | `--num_train_timesteps` | ❌ | 1000 | 训练时扩散步数（需与训练时一致） |
 | `--beta_schedule` | ❌ | `squaredcos_cap_v2` | 噪声调度类型 |
 | `--prediction_type` | ❌ | `sample` | 预测类型（sample/epsilon） |
-| `--diffusion_width` | ❌ | 512 | 扩散头隐藏维度 |
+| `--diffusion_width` | ❌ | 512 | 扩散头 Transformer 维度 |
+| `--n_decoder_layers` | ❌ | 6 | Transformer 解码器层数（需与训练时一致） |
+| `--n_encoder_layers` | ❌ | 4 | Transformer 编码器层数（需与训练时一致） |
+| `--n_heads` | ❌ | 8 | 注意力头数（需与训练时一致） |
 | `--out_dir` | ❌ | `output` | 输出目录 |
 
 ### 流式生成原理
@@ -434,9 +462,15 @@ pred_uncond = model(history, zero_embedding)    # 无文本条件
 pred_final = pred_uncond + cfg_scale * (pred_text - pred_uncond)
 ```
 
-- `cfg=1.0`：标准生成
-- `cfg>1.0`：更强的文本一致性（如 1.5, 2.0）
-- `cfg=0.0`：完全忽略文本
+**推荐配置**：
+- `cfg=1.0`：关闭 CFG，标准生成
+- `cfg=7.5`：**推荐值**，显著增强文本一致性
+- `cfg=1.5-3.0`：轻度引导
+- `cfg>10.0`：可能过度拟合文本，导致动作不自然
+
+**注意**：
+- 默认训练时 `cfg_mask_prob=0.0`（关闭 CFG 训练），但推理时仍可使用 CFG
+- 如需更强的 CFG 效果，可在训练时设置 `cfg_mask_prob=0.1`（10% 文本遮罩）
 
 ---
 
@@ -449,10 +483,11 @@ MotionDiffusionCore/
 │   └── motion_dataset.py       # 三个独立数据集类 + 组合加载器
 ├── models/                      # 模型定义
 │   ├── __init__.py
-│   ├── motion_diffusion.py     # 🎯 主模型（MLP + Transformer + Diffusion）
+│   ├── motion_diffusion.py     # 🎯 主模型（MLP + Encoder-Decoder Diffusion）
 │   ├── token_mlp.py            # 动作→token MLP (38→16)
-│   ├── transformer.py          # LLaMAHF Transformer
-│   ├── diffloss.py             # 扩散头（基于 HuggingFace Diffusers）
+│   ├── transformer_diffusion.py # Transformer 编码器-解码器（扩散头）
+│   ├── diffloss.py             # 扩散损失封装（基于 HuggingFace Diffusers）
+│   ├── transformer.py          # 遗留文件（已不再使用）
 │   └── diffusion/              # 扩散模型工具（兼容旧代码）
 │       ├── __init__.py
 │       ├── gaussian_diffusion.py   # 高斯扩散过程
@@ -534,13 +569,18 @@ self.inference_scheduler.set_timesteps(num_sampling_steps=10)
 1. **数据加载**：三个数据集分别加载，使用 `ConcatDataset` 组合
 2. **随机采样**：每个 batch 随机从数据集中采样 (step_idx, 60-frame history, 5-frame target)
 3. **文本编码**：文本 → T5/BGE → 512D/1024D 向量
-4. **CFG 训练**：10% 概率将文本置空，训练无条件分支
+4. **CFG 训练**：默认关闭（cfg_mask_prob=0.0），可设置为 0.1 启用（10% 概率置空文本）
 5. **前向传播**：
    ```python
-   history_tokens = token_mlp(history)           # (B, 60, 16)
-   conditions = transformer(history_tokens, text) # (B, 61, 512)
-   z = conditions[:, -1, :]                      # (B, 512)
-   loss = diffusion_head(target, z)              # 扩散损失
+   history_tokens = token_mlp(history)                    # (B, 60, 38) -> (B, 60, 16)
+   loss, pred = diffusion_head(
+       target=target,                                     # (B, 5, 38)
+       history_tokens=history_tokens,                     # (B, 60, 16)
+       text_emb=feat_text                                 # (B, 512)
+   )
+   # 内部流程：
+   # - 编码器融合 timestep + history_tokens + text -> memory
+   # - 解码器通过交叉注意力生成去噪后的动作
    ```
 6. **优化器**：AdamW (lr=1e-4, betas=(0.9, 0.99))
 7. **学习率调度**：Warmup (10%) + Cosine Decay
@@ -552,11 +592,15 @@ self.inference_scheduler.set_timesteps(num_sampling_steps=10)
 - **检查点内容**：
   ```python
   {
-      "trans": transformer.state_dict(),
-      "token_mlp": token_mlp.state_dict(),
-      "action_diffusion": diffusion_head.state_dict()
+      "token_mlp": token_mlp.state_dict(),           # 动作 token MLP
+      "action_diffusion": diffusion_head.state_dict(), # Transformer 编码器-解码器扩散头
+      "optimizer": optimizer.state_dict(),           # 优化器状态
+      "iter": current_iteration,                     # 当前迭代数
+      "args": training_args                          # 训练参数
   }
   ```
+
+**注意**：新架构的检查点与旧版本（包含独立 "trans" 键）不兼容。详见 `ARCHITECTURE_UPDATE.md`。
 
 ### 扩散训练细节
 
@@ -587,7 +631,7 @@ self.inference_scheduler.set_timesteps(num_sampling_steps=10)
 ### 3. 文本条件支持
 - HumanML3D：多文本描述 + 时间段切片
 - BABEL/HumanML3D Stream：动态 schedule 匹配
-- CFG 训练：10% 概率 mask 文本
+- CFG 训练：可选启用（cfg_mask_prob 可配置，默认 0.0）
 
 ### 4. 流式生成
 - 滚动预测，支持任意长度
@@ -648,6 +692,20 @@ cp -r /limx_embap/tos/user/Jensen/project/MotionStreamer/flan-t5-small \
 
 ---
 
+## 🔄 架构更新说明
+
+本项目已从 **Transformer Decoder + MLP 扩散头** 架构升级为 **Transformer 编码器-解码器扩散** 架构。
+
+**主要变化**：
+- ✅ 移除了独立的 LLaMAHF Transformer 编码器
+- ✅ 扩散头使用统一的 Transformer 编码器-解码器
+- ✅ 更强的条件融合和序列建模能力
+- ⚠️ **旧检查点不兼容**，需要从头训练
+
+**详细架构对比和迁移指南**：请参阅 [`ARCHITECTURE_UPDATE.md`](./ARCHITECTURE_UPDATE.md)
+
+---
+
 ## 📊 实验配置
 
 ### 默认超参数
@@ -658,20 +716,35 @@ cp -r /limx_embap/tos/user/Jensen/project/MotionStreamer/flan-t5-small \
 | Prediction Length | 5 | 预测窗口（0.1秒） |
 | Motion Dim | 38 | 动作维度 |
 | Latent Dim | 16 | Token 维度 |
-| Hidden Size | 512 | Transformer 隐藏层 |
+| Hidden Size | 512 | Token MLP 隐藏层 |
+| Diffusion Width | 512 | 扩散 Transformer 维度 |
+| Encoder Layers | 4 | Transformer 编码器层数 |
+| Decoder Layers | 6 | Transformer 解码器层数 |
+| Attention Heads | 8 | 注意力头数 |
 | Diffusion Steps (train) | 1000 | 训练时扩散步数（DDPM） |
 | Diffusion Steps (infer) | 10 | 推理时采样步数（DDIM，可配置 50） |
 | Beta Schedule | squaredcos_cap_v2 | 噪声调度类型 |
 | Prediction Type | sample | 预测目标（x0） |
+| CFG Mask Prob | 0.0 | CFG 训练文本遮罩概率（关闭） |
 | Batch Size | 256 | 批次大小 |
 | Learning Rate | 1e-4 | 初始学习率 |
-| Total Iterations | 100k | 总训练步数 |
+| Total Iterations | 200k | 总训练步数 |
+
+### 模型大小
+
+| 组件 | 参数量 | 说明 |
+|------|--------|------|
+| MotionTokenMLP | ~30K | 动作特征映射 |
+| Encoder (4层) | ~4M | 条件融合 |
+| Decoder (6层) | ~8M | 序列生成 |
+| **总计** | **~12M** | 轻量级模型 |
 
 ### 硬件配置
 
 - **推荐**：4x GPU (V100 / A100)
-- **显存**：每卡约 16GB
-- **训练时间**：100k 步约 12-24 小时（取决于 GPU）
+- **显存**：每卡约 16-20GB（batch_size=256）
+- **训练时间**：200k 步约 24-48 小时（取决于 GPU）
+- **单卡训练**：可行，但需要减小 batch_size（如 64）
 
 ---
 
@@ -691,9 +764,12 @@ A: A 段是过渡动作（transition），质量和一致性不如 B 段主要�
 
 ### Q4: CFG 强度如何选择？
 A: 
-- 1.0：平衡生成
-- 1.5-2.0：强文本一致性，推荐用于精确控制
-- >2.0：可能过度拟合文本，导致动作不自然
+- **1.0**：关闭 CFG，标准生成
+- **7.5**：**推荐值**，显著增强文本一致性
+- **1.5-3.0**：轻度引导，适合需要保留一定随机性的场景
+- **>10.0**：可能过度拟合文本，导致动作不自然
+
+**注意**：默认训练时未启用 CFG 训练（cfg_mask_prob=0.0），但推理时仍可使用 CFG。如需更强效果，可在训练时设置 cfg_mask_prob=0.1。
 
 ### Q5: 训练多久可以收敛？
 A: 经验值：
@@ -711,7 +787,7 @@ A:
 - 开发调试：10 步
 - 最终演示/发布：50 步
 
-### Q8: `/tmp` 空间不足怎么办？
+### Q7: `/tmp` 空间不足怎么办？
 A: 训练脚本已自动配置：
 - 临时文件：`项目目录/.tmp/`（DataLoader multiprocessing）
 - HuggingFace 缓存：`项目目录/.cache/huggingface/`
@@ -722,7 +798,44 @@ A: 训练脚本已自动配置：
 rm -rf .tmp/ .cache/
 ```
 
-### Q9: 如何加快数据加载速度？
+### Q8: 新旧架构有什么区别？
+A: **重要架构更新**：
+
+**旧架构（已废弃）**：
+```
+MotionTokenMLP → LLaMAHF Transformer → 条件向量 z → MLP 扩散头
+```
+
+**新架构（当前）**：
+```
+MotionTokenMLP → Transformer 编码器-解码器扩散头
+                  ├─ 编码器：融合 timestep + history + text
+                  └─ 解码器：生成去噪后的动作序列
+```
+
+**优势**：
+- ✅ 更强的条件融合（编码器双向注意力）
+- ✅ 更好的序列建模（解码器处理 5 帧序列）
+- ✅ 统一架构，无需独立编码器
+
+**注意**：旧检查点不兼容。详见 `ARCHITECTURE_UPDATE.md`。
+
+### Q9: 何时需要启用 CFG 训练？
+A: **默认关闭即可**（cfg_mask_prob=0.0），推理时仍可使用 CFG。
+
+**启用 CFG 训练的情况**（设置 cfg_mask_prob=0.1）：
+- ✅ 需要**更强的文本控制力**
+- ✅ 希望推理时使用**高 CFG 值**（如 7.5-10.0）
+- ✅ 生成的动作需要**严格遵循文本描述**
+
+**不启用的优势**（默认）：
+- ✅ 训练更快（无需额外的无条件分支）
+- ✅ 遵循 Pi0 的设计理念
+- ✅ 推理时仍可使用适度的 CFG（如 1.0-3.0）
+
+**建议**：先用默认配置训练，如果发现文本控制不够强，再启用 CFG 训练。
+
+### Q10: 如何加快数据加载速度？
 A: **已实现自动缓存机制** 🚀
 - **第一次训练**：预处理所有数据（2-5 分钟），并保存缓存到项目目录
 - **后续训练**：直接加载缓存（5-10 秒），加速 **10-50 倍**！
@@ -770,8 +883,14 @@ rm -rf .cache/datasets/
 
 8. **⚠️ 扩散配置一致性（重要）**：
    - 推理时 `num_train_timesteps`、`beta_schedule`、`prediction_type` **必须与训练时一致**
-   - 只有 `num_sampling_steps` 可以在推理时自由调整（10 或 50）
+   - 推理时 `n_decoder_layers`、`n_encoder_layers`、`n_heads` **必须与训练时一致**
+   - 只有 `num_sampling_steps` 和 `cfg` 可以在推理时自由调整
    - 如果加载旧模型出错，检查 checkpoint 中保存的配置参数
+
+9. **⚠️ 架构版本兼容性**：
+   - 当前版本使用 Transformer 编码器-解码器架构
+   - 旧版本检查点（包含 "trans" 键）不兼容
+   - 详见 `ARCHITECTURE_UPDATE.md` 了解架构变更
 
 ---
 

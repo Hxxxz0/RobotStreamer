@@ -56,18 +56,16 @@ def load_checkpoint(model, ckpt_path, optimizer=None, scheduler=None):
         print(f"Loading checkpoint from {ckpt_path}")
     ckpt = torch.load(ckpt_path, map_location="cpu")
 
-    if "trans" in ckpt:
-        new_ckpt_trans = {}
-        for key in ckpt["trans"].keys():
-            new_key = ".".join(key.split(".")[1:]) if key.split(".")[0] == "module" else key
-            new_ckpt_trans[new_key] = ckpt["trans"][key]
-        model.trans_encoder.load_state_dict(new_ckpt_trans, strict=True)
-
+    # Note: trans_encoder is now integrated into action_diffusion (Transformer Encoder-Decoder)
+    # Old checkpoints with separate "trans" key are not compatible with new architecture
+    
     if "token_mlp" in ckpt:
         model.token_mlp.load_state_dict(ckpt["token_mlp"], strict=True)
+        if is_main: print("Loaded token_mlp")
 
     if "action_diffusion" in ckpt:
         model.action_diffusion.load_state_dict(ckpt["action_diffusion"], strict=True)
+        if is_main: print("Loaded action_diffusion")
     
     # Load optimizer and scheduler state if available and requested
     if optimizer is not None and "optimizer" in ckpt:
@@ -132,8 +130,12 @@ def parse_args():
     # Model parameters
     parser.add_argument("--hidden_size", type=int, default=config.get("hidden_size", 512))
     parser.add_argument("--latent_dim", type=int, default=config.get("latent_dim", 16))
-    parser.add_argument("--num_diffusion_head_layers", type=int, default=config.get("num_diffusion_head_layers", 4))
     parser.add_argument("--motion_dim", type=int, default=config.get("motion_dim", 38))
+    
+    # Transformer encoder-decoder parameters
+    parser.add_argument("--n_decoder_layers", type=int, default=config.get("n_decoder_layers", 6))
+    parser.add_argument("--n_encoder_layers", type=int, default=config.get("n_encoder_layers", 4))
+    parser.add_argument("--n_heads", type=int, default=config.get("n_heads", 8))
     
     # Diffusion parameters
     parser.add_argument("--num_sampling_steps", type=int, default=config.get("num_sampling_steps", 10))
@@ -210,7 +212,6 @@ def main():
         hidden_size=args.hidden_size,
         latent_dim=args.latent_dim,
         text_encoder_dim=text_encoder_dim,
-        num_diffusion_head_layers=args.num_diffusion_head_layers,
         history_len=history_len,
         pred_len=pred_len,
         device=device,
@@ -220,6 +221,10 @@ def main():
         prediction_type=args.prediction_type,
         diffusion_width=args.diffusion_width,
         grad_checkpointing=args.grad_checkpointing,
+        # Transformer encoder-decoder config
+        n_decoder_layers=args.n_decoder_layers,
+        n_encoder_layers=args.n_encoder_layers,
+        n_heads=args.n_heads,
     )
 
     optimizer = torch.optim.AdamW(
@@ -313,7 +318,6 @@ def main():
             if accelerator.is_main_process:
                 unwrapped_model = accelerator.unwrap_model(model)
                 save_dict = {
-                        "trans": unwrapped_model.trans_encoder.state_dict(),
                         "token_mlp": unwrapped_model.token_mlp.state_dict(),
                         "action_diffusion": unwrapped_model.action_diffusion.state_dict(),
                         "optimizer": optimizer.state_dict(),
@@ -330,7 +334,6 @@ def main():
             if accelerator.is_main_process:
                 unwrapped_model = accelerator.unwrap_model(model)
                 save_dict = {
-                        "trans": unwrapped_model.trans_encoder.state_dict(),
                         "token_mlp": unwrapped_model.token_mlp.state_dict(),
                         "action_diffusion": unwrapped_model.action_diffusion.state_dict(),
                         "optimizer": optimizer.state_dict(),
