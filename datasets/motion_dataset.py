@@ -149,17 +149,25 @@ class BaseMotionDataset(data.Dataset):
         return motion
 
     def _build_history_window(self, motion, step_idx):
-        """Build history window with first-frame padding if needed."""
+        """Build history window with zero-padding if needed.
+        
+        Returns:
+            history: [history_len, D] - History frames (with 0-padding if needed)
+            mask: [history_len] - True for valid frames, False for padding
+        """
         start = max(0, step_idx - self.history_len + 1)
         history = motion[start : step_idx + 1]
+        
+        # Create mask: True for valid frames, False for padding
+        mask = np.ones(self.history_len, dtype=bool)
+        
         if history.shape[0] < self.history_len:
             pad_count = self.history_len - history.shape[0]
-            # Use first frame for padding instead of zeros
-            # This represents "static pose at start" rather than "mean pose"
-            first_frame = history[0:1]  # Keep dims: [1, D]
-            pad = np.repeat(first_frame, pad_count, axis=0)  # [pad_count, D]
+            pad = np.zeros((pad_count, motion.shape[1]), dtype=motion.dtype)
             history = np.concatenate([pad, history], axis=0)
-        return history
+            mask[:pad_count] = False  # Mark padding positions as False
+        
+        return history, mask
 
     def __len__(self):
         return len(self.data_list)
@@ -273,14 +281,14 @@ class HumanML3DDataset(BaseMotionDataset):
                 continue
             step_idx = random.randint(0, max_step)
 
-            history = self._build_history_window(motion, step_idx)
+            history, history_mask = self._build_history_window(motion, step_idx)
             target = motion[step_idx + 1 : step_idx + 1 + self.pred_len]
             if target.shape[0] < self.pred_len:
                 item = random.randint(0, len(self.data_list) - 1)
                 continue
 
             caption = random.choice(data["text_list"]) if data["text_list"] else ""
-            return caption, history.astype(np.float32), target.astype(np.float32)
+            return caption, history.astype(np.float32), target.astype(np.float32), history_mask
 
         raise RuntimeError("Failed to sample valid segment from HumanML3D")
 
@@ -422,14 +430,14 @@ class BABELStreamDataset(BaseMotionDataset):
                 continue
             step_idx = random.randint(min_step, max_step)
 
-            history = self._build_history_window(motion, step_idx)
+            history, history_mask = self._build_history_window(motion, step_idx)
             target = motion[step_idx + 1 : step_idx + 1 + self.pred_len]
             if target.shape[0] < self.pred_len:
                 item = random.randint(0, len(self.data_list) - 1)
                 continue
 
             caption = self._caption_from_schedule(data["text_schedule"], step_idx)
-            return caption, history.astype(np.float32), target.astype(np.float32)
+            return caption, history.astype(np.float32), target.astype(np.float32), history_mask
 
         raise RuntimeError("Failed to sample valid segment from BABEL Stream")
 
@@ -576,14 +584,14 @@ class HumanML3DStreamDataset(BaseMotionDataset):
                 continue
             step_idx = random.randint(min_step, max_step)
 
-            history = self._build_history_window(motion, step_idx)
+            history, history_mask = self._build_history_window(motion, step_idx)
             target = motion[step_idx + 1 : step_idx + 1 + self.pred_len]
             if target.shape[0] < self.pred_len:
                 item = random.randint(0, len(self.data_list) - 1)
                 continue
 
             caption = self._caption_from_schedule(data["text_schedule"], step_idx)
-            return caption, history.astype(np.float32), target.astype(np.float32)
+            return caption, history.astype(np.float32), target.astype(np.float32), history_mask
 
         raise RuntimeError("Failed to sample valid segment from HumanML3D Stream")
 

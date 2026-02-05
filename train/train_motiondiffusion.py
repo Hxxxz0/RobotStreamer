@@ -271,10 +271,11 @@ def main():
     avg_loss = 0.0
     while nb_iter <= args.total_iter:
         batch = next(train_loader_iter)
-        caption, history, target = batch
+        caption, history, target, history_mask = batch
         caption = list(caption)
         history = history.to(device).float()
         target = target.to(device).float()
+        history_mask = history_mask.to(device)  # [B, history_len], bool
 
         bs = len(caption)
         # Classifier-Free Guidance: mask captions based on cfg_mask_prob
@@ -290,7 +291,7 @@ def main():
         feat_text = torch.from_numpy(unwrapped_text_encoder.encode(caption)).float()
         feat_text = feat_text.to(device)
 
-        loss, _ = model(history, feat_text, target)
+        loss, _ = model(history, feat_text, target, history_mask=history_mask)
 
         optimizer.zero_grad()
         accelerator.backward(loss)

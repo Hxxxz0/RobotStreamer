@@ -93,7 +93,7 @@ class MotionDiffusionModel(nn.Module):
         self.input_dim = input_dim
         self.device = device
 
-    def forward(self, history, feat_text, target=None):
+    def forward(self, history, feat_text, target=None, history_mask=None):
         """
         Forward pass for training or inference.
         
@@ -101,6 +101,7 @@ class MotionDiffusionModel(nn.Module):
             history: (B, history_len, input_dim) - Historical motion frames
             feat_text: (B, text_encoder_dim) - Text condition features
             target: (B, pred_len, input_dim) - Ground truth future frames (for training)
+            history_mask: (B, history_len) - True for valid frames, False for padding
         
         Returns:
             If target is provided (training):
@@ -113,7 +114,8 @@ class MotionDiffusionModel(nn.Module):
         history_tokens = self.token_mlp(history)  # (B, 60, 38) -> (B, 60, 16)
         
         # Step 2: Fuse history tokens + text with Transformer
-        conditions = self.trans_encoder(history_tokens, feat_text)  # (B, 60, 512)
+        # Pass history_mask to mask out padding positions in attention
+        conditions = self.trans_encoder(history_tokens, feat_text, mask=history_mask)  # (B, 60, 512)
         
         # Step 3: Extract condition vector from last token
         z = conditions[:, -1, :]  # (B, 512)
@@ -128,7 +130,7 @@ class MotionDiffusionModel(nn.Module):
         loss, pred = self.action_diffusion(target_flat, z)
         return loss, pred
 
-    def predict(self, history, feat_text, cfg_scale=1.0, empty_feat_text=None, temperature=1.0):
+    def predict(self, history, feat_text, cfg_scale=1.0, empty_feat_text=None, temperature=1.0, history_mask=None):
         """
         Inference with Classifier-Free Guidance.
         
@@ -138,6 +140,7 @@ class MotionDiffusionModel(nn.Module):
             cfg_scale: CFG guidance scale (1.0 = no guidance, !=1.0 = use CFG)
             empty_feat_text: (B, text_encoder_dim) - Empty text features for CFG (required if cfg_scale != 1.0)
             temperature: Sampling temperature for noise scaling (default: 1.0)
+            history_mask: (B, history_len) - True for valid frames, False for padding
         
         Returns:
             pred_motion: (B, pred_len, input_dim) - Predicted future motion
@@ -145,7 +148,7 @@ class MotionDiffusionModel(nn.Module):
         with torch.no_grad():
             # Get condition vector
             history_tokens = self.token_mlp(history)
-            conditions = self.trans_encoder(history_tokens, feat_text)
+            conditions = self.trans_encoder(history_tokens, feat_text, mask=history_mask)
             z = conditions[:, -1, :]
             
             # Apply CFG if requested (consistent with diffloss.py)
@@ -153,7 +156,7 @@ class MotionDiffusionModel(nn.Module):
                 if empty_feat_text is None:
                     raise ValueError("empty_feat_text is required when cfg_scale != 1.0")
                 # Get unconditional condition vector
-                empty_conditions = self.trans_encoder(history_tokens, empty_feat_text)
+                empty_conditions = self.trans_encoder(history_tokens, empty_feat_text, mask=history_mask)
                 empty_z = empty_conditions[:, -1, :]
                 # Concatenate [cond, uncond] for CFG
                 z = torch.cat([z, empty_z], dim=0)

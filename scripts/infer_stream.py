@@ -19,13 +19,29 @@ from utils.motion_npz import save_motion_npz
 
 
 def build_history_window(history, history_len, input_dim):
+    """Build history window with padding if needed.
+    
+    Returns:
+        history: [history_len, input_dim] - History frames
+        mask: [history_len] - True for valid frames, False for padding
+    """
+    mask = np.ones(history_len, dtype=bool)
+    
     if history is None:
-        return np.zeros((history_len, input_dim), dtype=np.float32)
+        # All padding
+        mask[:] = False
+        return np.zeros((history_len, input_dim), dtype=np.float32), mask
+    
     if history.shape[0] >= history_len:
-        return history[-history_len:]
+        # No padding needed
+        return history[-history_len:], mask
+    
+    # Need padding
     pad_count = history_len - history.shape[0]
     pad = np.zeros((pad_count, history.shape[1]), dtype=history.dtype)
-    return np.concatenate([pad, history], axis=0)
+    history_padded = np.concatenate([pad, history], axis=0)
+    mask[:pad_count] = False  # Mark padding positions
+    return history_padded, mask
 
 
 def encode_text(text_encoder, text, device):
@@ -112,7 +128,7 @@ def main():
             raise ValueError(f"history_npy dim mismatch: {history.shape[1]} vs {input_dim}")
         history = (history - mean) / std
 
-    history = build_history_window(history, args.history_len, input_dim)
+    history, history_mask = build_history_window(history, args.history_len, input_dim)
 
     # Initialize Model
     model = MotionDiffusionModel(
@@ -163,13 +179,16 @@ def main():
 
     all_predictions = []
     current_history = history.copy()
+    current_mask = history_mask.copy()
     num_iterations = (args.max_motion_length + args.pred_len - 1) // args.pred_len
 
     print(f"[Info] Generating {num_iterations} iterations (~{args.max_motion_length} frames)")
 
     with torch.no_grad():
         for iter_idx in range(num_iterations):
+            # Get last history_len frames and corresponding mask
             history_tensor = torch.from_numpy(current_history[-args.history_len:]).unsqueeze(0).to(device).float()
+            mask_tensor = torch.from_numpy(current_mask[-args.history_len:]).unsqueeze(0).to(device)
             
             # Predict using model method
             pred_tensor = model.predict(
@@ -177,7 +196,8 @@ def main():
                 feat_text, 
                 cfg_scale=args.cfg, 
                 empty_feat_text=empty_feat,
-                temperature=args.temperature
+                temperature=args.temperature,
+                history_mask=mask_tensor
             )
 
             pred = pred_tensor.squeeze(0).cpu().numpy() # (5, 38)
@@ -185,6 +205,9 @@ def main():
 
             all_predictions.append(pred_denorm)
             current_history = np.concatenate([current_history, pred], axis=0)
+            # Mark new frames as valid (not padding)
+            new_mask = np.ones(pred.shape[0], dtype=bool)
+            current_mask = np.concatenate([current_mask, new_mask], axis=0)
 
             print(f"[Info] Iteration {iter_idx + 1}/{num_iterations}: Generated {pred_denorm.shape[0]} frames")
 
