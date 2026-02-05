@@ -18,7 +18,7 @@ batch_size: 256
 num_workers: 8
 
 # Training
-total_iter: 200000
+total_iter: 500000
 lr: 1e-4
 weight_decay: 0.0
 seed: 123
@@ -47,6 +47,11 @@ grad_checkpointing: false      # Enable to save memory during training
 cfg_mask_prob: 0.0             # Probability of masking text during training (0.0 = no CFG, 0.1 = 10% masking)
                                 # Set to 0.0 to follow Pi0's approach (no CFG training)
                                 # Set to 0.1 to enable CFG for stronger text control
+
+# Root Loss Weighting
+root_loss_weight: 10.0          # Loss weight multiplier for root features (dims 29-37)
+                                # 1.0 = no weighting, 10.0 = 10x weight for root movement
+                                # Higher values encourage more root movement (position + rotation)
 
 # Text Encoder
 text_encoder_type: t5  # or bge

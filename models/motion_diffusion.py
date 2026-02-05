@@ -69,6 +69,8 @@ class MotionDiffusionModel(nn.Module):
         n_decoder_layers=6,
         n_encoder_layers=4,
         n_heads=8,
+        # Root loss weighting
+        root_loss_weight=1.0,
     ):
         super().__init__()
         
@@ -78,6 +80,7 @@ class MotionDiffusionModel(nn.Module):
         # 2. Diffusion Head with Transformer Encoder-Decoder
         self.action_diffusion = DiffLoss(
             motion_dim=input_dim,
+            root_loss_weight=root_loss_weight,
             pred_len=pred_len,
             history_len=history_len,
             history_token_dim=latent_dim,

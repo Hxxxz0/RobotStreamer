@@ -25,6 +25,7 @@ class DiffLoss(nn.Module):
         beta_schedule="squaredcos_cap_v2",
         prediction_type="sample",
         grad_checkpointing=False,
+        root_loss_weight=1.0,
     ):
         """
         Diffusion loss module with Transformer Encoder-Decoder.
@@ -48,6 +49,7 @@ class DiffLoss(nn.Module):
             beta_schedule: Noise schedule type (default: "squaredcos_cap_v2")
             prediction_type: What the model predicts - "sample" (x0) or "epsilon" (noise) (default: "sample")
             grad_checkpointing: Enable gradient checkpointing to save memory
+            root_loss_weight: Weight multiplier for root features (dimensions 29-37) (default: 1.0)
         """
         super().__init__()
         self.num_sampling_steps = num_sampling_steps
@@ -56,6 +58,13 @@ class DiffLoss(nn.Module):
         self.prediction_type = prediction_type
         self.motion_dim = motion_dim
         self.pred_len = pred_len
+        self.root_loss_weight = root_loss_weight
+        
+        # Create loss weight tensor: [joint_pos(29), root_vel_xy(2), root_z(1), root_rot_6d(6)]
+        # Shape: (motion_dim,) -> weights for each dimension
+        loss_weights = torch.ones(motion_dim)
+        loss_weights[29:38] = root_loss_weight  # Apply weight to root features (dims 29-37)
+        self.register_buffer('loss_weights', loss_weights)
         
         # Transformer Encoder-Decoder Network
         self.net = TransformerForDiffusion(
@@ -137,6 +146,13 @@ class DiffLoss(nn.Module):
             raise ValueError(f"Unsupported prediction type: {self.prediction_type}")
 
         loss = F.mse_loss(model_output, target_loss, reduction='none')
+        
+        # Apply dimension-wise loss weights (root features get higher weight)
+        # loss shape: (B, pred_len, motion_dim)
+        # loss_weights shape: (motion_dim,) -> broadcast to (1, 1, motion_dim)
+        loss_weights_broadcast = self.loss_weights.view(1, 1, -1)
+        loss = loss * loss_weights_broadcast
+        
         if mask is not None:
             # Ensure mask broadcasts correctly with loss
             while mask.ndim < loss.ndim:

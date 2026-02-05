@@ -1,16 +1,17 @@
 cd /limx_embap/tos/user/Jensen/project/MotionDiffusionCore
 conda activate mgpt
 
+
 # Inference settings:
 # - If trained with cfg_mask_prob=0.0 (default): use --cfg 1.0 (no CFG)
 # - If trained with cfg_mask_prob>0.0 (e.g., 0.1): use --cfg 1.5~2.5 (enable CFG)
 # - temperature: 1.0 for standard sampling, <1.0 for more deterministic results
 python scripts/infer_stream.py \
-  --ckpt outputs/motion_diff/latest.pth \
+  --ckpt outputs/motion_diff/diffusion_policy.pth \
   --mean /limx_embap/tos/user/Jensen/project/dataset/statistics/Mean.npy \
   --std /limx_embap/tos/user/Jensen/project/dataset/statistics/Std.npy \
-  --text "A person waves its left hand." \
-  --max_motion_length 500 \
+  --text "A person turns around 360 degrees." \
+  --max_motion_length 1000 \
   --num_sampling_steps 10 \
   --cfg 1.0 \
   --temperature 1.0 \

@@ -150,6 +150,10 @@ def parse_args():
                         help="Probability of masking text during training (0.0=no CFG, 0.1=10%% masking)")
     parser.add_argument("--grad_checkpointing", type=bool, default=config.get("grad_checkpointing", False))
     
+    # Root loss weighting
+    parser.add_argument("--root_loss_weight", type=float, default=config.get("root_loss_weight", 1.0),
+                        help="Loss weight multiplier for root features (dims 29-37). Higher = more root movement")
+    
     # Text encoder
     parser.add_argument("--text_encoder_type", type=str, default=config.get("text_encoder_type", "t5"), 
                         choices=["bge", "t5"])
@@ -182,9 +186,9 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(log_dir, exist_ok=True)
 
-    # Enable finding unused parameters for DDP (some model params may not be used in every forward pass)
+    # Disable finding unused parameters for DDP (all parameters are used in forward pass)
     from accelerate import DistributedDataParallelKwargs
-    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
     accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
     device = accelerator.device
 
@@ -225,6 +229,8 @@ def main():
         n_decoder_layers=args.n_decoder_layers,
         n_encoder_layers=args.n_encoder_layers,
         n_heads=args.n_heads,
+        # Root loss weighting
+        root_loss_weight=args.root_loss_weight,
     )
 
     optimizer = torch.optim.AdamW(

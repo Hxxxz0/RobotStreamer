@@ -205,6 +205,7 @@ def main():
                 temperature=args.temperature,
                 history_mask=mask_tensor
             )
+            
 
             pred = pred_tensor.squeeze(0).cpu().numpy() # (5, 38)
             pred_denorm = pred * std + mean
