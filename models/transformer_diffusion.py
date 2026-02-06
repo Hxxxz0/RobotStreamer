@@ -199,6 +199,7 @@ class TransformerForDiffusion(nn.Module):
         timestep: Union[torch.Tensor, float, int], 
         cond: Optional[torch.Tensor] = None,
         text_emb: Optional[torch.Tensor] = None,
+        history_mask: Optional[torch.Tensor] = None,
         **kwargs
     ):
         """
@@ -209,6 +210,7 @@ class TransformerForDiffusion(nn.Module):
             timestep: (B,) or int - Diffusion timestep
             cond: (B, n_obs_steps, cond_dim) - History condition (e.g., B, 60, 16)
             text_emb: (B, text_dim) - Text embedding (e.g., B, 512)
+            history_mask: (B, n_obs_steps) - Bool mask, True=valid, False=padding
         
         Returns:
             output: (B, T, output_dim) - Denoised samples
@@ -235,29 +237,43 @@ class TransformerForDiffusion(nn.Module):
             text_emb_proj = self.text_emb_proj(text_emb).unsqueeze(1)  # (B, 1, n_emb)
             cond_embeddings = torch.cat([cond_embeddings, text_emb_proj], dim=1)
         
-        # 3. Encoder: process conditions
+        # 3. Build padding mask for encoder: [timestep, history, text]
+        # Transformer's src_key_padding_mask: True=ignore, False=attend
+        # Our history_mask: True=valid, False=padding
+        # So we need to invert history_mask
+        src_key_padding_mask = None
+        if history_mask is not None:
+            # Build mask: [False(timestep), ~history_mask, False(text)]
+            timestep_mask = torch.zeros((B, 1), dtype=torch.bool, device=device)  # timestep always valid
+            text_mask = torch.zeros((B, 1), dtype=torch.bool, device=device)  # text always valid
+            history_padding_mask = ~history_mask  # Invert: True=padding, False=valid
+            src_key_padding_mask = torch.cat([timestep_mask, history_padding_mask, text_mask], dim=1)
+        
+        # 4. Encoder: process conditions
         tc = cond_embeddings.shape[1]
         position_embeddings = self.cond_pos_emb[:, :tc, :]
         x = self.drop(cond_embeddings + position_embeddings)
         
         if isinstance(self.encoder, nn.TransformerEncoder):
-            memory = self.encoder(x)
+            memory = self.encoder(x, src_key_padding_mask=src_key_padding_mask)
         else:
-            # Simple MLP encoder
+            # Simple MLP encoder doesn't support mask
             memory = self.encoder(x)
         # memory: (B, T_cond, n_emb)
         
-        # 4. Decoder: process noisy samples
+        # 5. Decoder: process noisy samples
         token_embeddings = self.input_emb(sample)  # (B, T, n_emb)
         t = token_embeddings.shape[1]
         position_embeddings = self.pos_emb[:, :t, :]
         x = self.drop(token_embeddings + position_embeddings)
         
+        # Decoder with padding mask for cross-attention
         x = self.decoder(
             tgt=x,
             memory=memory,
             tgt_mask=self.mask,
-            memory_mask=self.memory_mask
+            memory_mask=self.memory_mask,
+            memory_key_padding_mask=src_key_padding_mask  # ✅ 告诉 decoder 哪些 memory 位置是 padding
         )
         # x: (B, T, n_emb)
         
@@ -275,6 +291,7 @@ class TransformerForDiffusion(nn.Module):
         cond: Optional[torch.Tensor] = None,
         text_emb: Optional[torch.Tensor] = None,
         cfg_scale: float = 1.0,
+        history_mask: Optional[torch.Tensor] = None,
         **kwargs
     ):
         """
@@ -286,12 +303,13 @@ class TransformerForDiffusion(nn.Module):
             cond: (2B, n_obs_steps, cond_dim) - [cond, uncond] concatenated
             text_emb: (2B, text_dim) - [cond_text, uncond_text] concatenated
             cfg_scale: CFG guidance scale
+            history_mask: (2B, n_obs_steps) - Bool mask for history tokens
         
         Returns:
             output: (B, T, output_dim) - Guided prediction
         """
         if cfg_scale == 1.0:
-            return self.forward(sample, timestep, cond, text_emb)
+            return self.forward(sample, timestep, cond, text_emb, history_mask)
         
         B = sample.shape[0]
         
@@ -308,7 +326,7 @@ class TransformerForDiffusion(nn.Module):
             timestep = timestep.repeat(2)  # (2B,)
         
         # Forward pass for both paths
-        model_out = self.forward(sample_combined, timestep, cond, text_emb)  # (2B, T, D)
+        model_out = self.forward(sample_combined, timestep, cond, text_emb, history_mask)  # (2B, T, D)
         
         # Split and apply CFG
         cond_out, uncond_out = torch.split(model_out, B, dim=0)

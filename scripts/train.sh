@@ -27,7 +27,7 @@ nohup accelerate launch \
   --num_processes 4 \
   --num_machines 1 \
   --dynamo_backend no \
-  train/train_motiondiffusion.py \
+  train/train.py \
   --config configs/default.yaml \
   > logs/motion_diff/train.log 2>&1 &
 

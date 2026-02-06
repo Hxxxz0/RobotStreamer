@@ -220,7 +220,7 @@ def main():
 
     final_motion = np.concatenate(all_predictions, axis=0)
     final_motion = final_motion[:args.max_motion_length]
-
+    
     print(f"[Info] Final motion shape: {final_motion.shape}")
 
     os.makedirs(args.out_dir, exist_ok=True)

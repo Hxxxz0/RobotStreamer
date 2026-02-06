@@ -4,10 +4,8 @@ Supports HumanML3D, BABEL Stream, and HumanML3D Stream datasets.
 """
 
 import os
-import sys
 import random
 import codecs as cs
-import importlib.util
 import warnings
 import pickle
 import hashlib
@@ -91,49 +89,9 @@ class BaseMotionDataset(data.Dataset):
         if self.process_robot_npz is not None:
             return
         
-        # Try direct import first (if installed as package)
-        try:
-            from utils.robot_process import process_robot_npz
-            self.process_robot_npz = process_robot_npz
-            return
-        except ImportError:
-            pass
-        
-        # Fallback: auto-detect from common locations
-        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        search_paths = [
-            os.environ.get("STABLE_UTILS_DIR"),
-            pjoin(project_root, "external/StableMoFusion/utils"),
-            "/limx_embap/tos/user/Jensen/dataset/motion_data/StableMoFusion/utils",
-        ]
-        
-        utils_dir = None
-        for path in search_paths:
-            if path and os.path.isfile(pjoin(path, "robot_process.py")):
-                utils_dir = path
-                break
-        
-        if not utils_dir:
-            raise ImportError(
-                "StableMoFusion not found. Please:\n"
-                "  export STABLE_UTILS_DIR=/path/to/StableMoFusion/utils\n"
-                "Or place in: external/StableMoFusion/"
-            )
-        
-        # Load all required modules
-        def load_module(mod_name, filename):
-            spec = importlib.util.spec_from_file_location(mod_name, pjoin(utils_dir, filename))
-            module = importlib.util.module_from_spec(spec)
-            sys.modules[mod_name] = module
-            spec.loader.exec_module(module)
-            return module
-        
-        # Load dependencies first
-        load_module("utils.quaternion", "quaternion.py")
-        load_module("utils.rotation_utils", "rotation_utils.py")
-        robot_mod = load_module("utils.robot_process", "robot_process.py")
-        
-        self.process_robot_npz = robot_mod.process_robot_npz
+        # Import from project's utils directory
+        from utils.robot_process import process_robot_npz
+        self.process_robot_npz = process_robot_npz
 
     def _load_motion(self, path):
         """Load and validate motion from npz file."""

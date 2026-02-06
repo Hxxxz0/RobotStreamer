@@ -99,7 +99,7 @@ class DiffLoss(nn.Module):
             clip_sample=False
         )
 
-    def forward(self, target, history_tokens, text_emb, mask=None):
+    def forward(self, target, history_tokens, text_emb, mask=None, history_mask=None):
         """
         Training forward pass with diffusion loss.
         
@@ -108,6 +108,7 @@ class DiffLoss(nn.Module):
             history_tokens: (B, history_len, token_dim) - History tokens
             text_emb: (B, text_dim) - Text embedding
             mask: Optional mask for loss weighting
+            history_mask: (B, history_len) - Bool mask for history tokens (True=valid, False=padding)
             
         Returns:
             loss: Scalar loss
@@ -132,7 +133,8 @@ class DiffLoss(nn.Module):
             sample=noisy_target,
             timestep=t,
             cond=history_tokens,
-            text_emb=text_emb
+            text_emb=text_emb,
+            history_mask=history_mask
         )
         
         # 5. Compute Loss based on prediction type
@@ -166,7 +168,7 @@ class DiffLoss(nn.Module):
         model_output = model_output.reshape(batch_size, -1)
         return loss.mean(), model_output
 
-    def sample(self, history_tokens, text_emb, temperature=1.0, cfg=1.0):
+    def sample(self, history_tokens, text_emb, temperature=1.0, cfg=1.0, history_mask=None):
         """
         Inference sampling using DDIM.
         
@@ -175,6 +177,7 @@ class DiffLoss(nn.Module):
             text_emb: (B, text_dim) or (2B, text_dim) - Text embedding
             temperature: Noise temperature scaling
             cfg: Classifier-free guidance scale
+            history_mask: (B, history_len) or (2B, history_len) - Bool mask for history tokens
             
         Returns:
             sample: (B, motion_dim*pred_len) - Generated clean samples (flattened)
@@ -204,7 +207,8 @@ class DiffLoss(nn.Module):
                     timestep=t_batch,
                     cond=history_tokens,
                     text_emb=text_emb,
-                    cfg_scale=cfg
+                    cfg_scale=cfg,
+                    history_mask=history_mask
                 )
             else:
                 # Standard prediction
@@ -213,7 +217,8 @@ class DiffLoss(nn.Module):
                     sample=sample,
                     timestep=t_batch,
                     cond=history_tokens,
-                    text_emb=text_emb
+                    text_emb=text_emb,
+                    history_mask=history_mask
                 )
             
             # DDIM step: compute x_{t-1} from predicted x0

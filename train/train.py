@@ -131,6 +131,8 @@ def parse_args():
     parser.add_argument("--hidden_size", type=int, default=config.get("hidden_size", 512))
     parser.add_argument("--latent_dim", type=int, default=config.get("latent_dim", 16))
     parser.add_argument("--motion_dim", type=int, default=config.get("motion_dim", 38))
+    parser.add_argument("--history_len", type=int, default=config.get("history_len", 60))
+    parser.add_argument("--pred_len", type=int, default=config.get("pred_len", 5))
     
     # Transformer encoder-decoder parameters
     parser.add_argument("--n_decoder_layers", type=int, default=config.get("n_decoder_layers", 6))
@@ -208,8 +210,8 @@ def main():
         args.text_encoder_type, text_encoder_path, args.text_encoder_device
     )
 
-    history_len = 60
-    pred_len = 5
+    history_len = args.history_len
+    pred_len = args.pred_len
 
     model = MotionDiffusionModel(
         input_dim=args.motion_dim,
@@ -336,7 +338,8 @@ def main():
                 )
                 logger.info(f"Saved checkpoint at iter {nb_iter}")
 
-        if nb_iter == 100000:
+        # Save permanent checkpoints every 100K iterations
+        if nb_iter % 100000 == 0:
             if accelerator.is_main_process:
                 unwrapped_model = accelerator.unwrap_model(model)
                 save_dict = {
@@ -348,8 +351,9 @@ def main():
                     }
                 torch.save(
                     save_dict,
-                    os.path.join(output_dir, "ckpt_100000.pth"),
+                    os.path.join(output_dir, f"ckpt_{nb_iter}.pth"),
                 )
+                logger.info(f"Saved permanent checkpoint at iter {nb_iter}")
 
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:

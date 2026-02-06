@@ -109,21 +109,22 @@ class MotionDiffusionModel(nn.Module):
             history: (B, history_len, input_dim) - Historical motion frames
             feat_text: (B, text_encoder_dim) - Text condition features
             target: (B, pred_len, input_dim) - Ground truth future frames (for training)
-            history_mask: (B, history_len) - Not used in new architecture
+            history_mask: (B, history_len) - Bool mask, True for valid frames, False for padding
         
         Returns:
             loss: Diffusion loss
             pred: Predicted motion (B, pred_len * input_dim)
         """
         # Step 1: Convert motion history to tokens
-        history_tokens = self.token_mlp(history)  # (B, 60, 38) -> (B, 60, 16)
+        history_tokens = self.token_mlp(history)  # (B, history_len, 38) -> (B, history_len, 16)
         
         # Step 2: Compute diffusion loss with transformer encoder-decoder
-        target_flat = target.reshape(target.shape[0], -1)  # (B, 5, 38) -> (B, 190)
+        target_flat = target.reshape(target.shape[0], -1)  # (B, pred_len, 38) -> (B, pred_len*38)
         loss, pred = self.action_diffusion(
             target=target_flat,
             history_tokens=history_tokens,
-            text_emb=feat_text
+            text_emb=feat_text,
+            history_mask=history_mask
         )
         return loss, pred
 
@@ -137,7 +138,7 @@ class MotionDiffusionModel(nn.Module):
             cfg_scale: CFG guidance scale (1.0 = no guidance, !=1.0 = use CFG)
             empty_feat_text: (B, text_encoder_dim) - Empty text features for CFG (required if cfg_scale != 1.0)
             temperature: Sampling temperature for noise scaling (default: 1.0)
-            history_mask: (B, history_len) - Not used in new architecture
+            history_mask: (B, history_len) - Bool mask, True for valid frames, False for padding
         
         Returns:
             pred_motion: (B, pred_len, input_dim) - Predicted future motion
@@ -153,19 +154,23 @@ class MotionDiffusionModel(nn.Module):
                 # Concatenate conditional and unconditional
                 history_tokens_combined = torch.cat([history_tokens, history_tokens], dim=0)
                 text_emb_combined = torch.cat([feat_text, empty_feat_text], dim=0)
+                # Duplicate mask for CFG
+                history_mask_combined = torch.cat([history_mask, history_mask], dim=0) if history_mask is not None else None
                 
                 pred_flat = self.action_diffusion.sample(
                     history_tokens=history_tokens_combined,
                     text_emb=text_emb_combined,
                     temperature=temperature,
-                    cfg=cfg_scale
+                    cfg=cfg_scale,
+                    history_mask=history_mask_combined
                 )
             else:
                 pred_flat = self.action_diffusion.sample(
                     history_tokens=history_tokens,
                     text_emb=feat_text,
                     temperature=temperature,
-                    cfg=cfg_scale
+                    cfg=cfg_scale,
+                    history_mask=history_mask
                 )
             
             pred_motion = pred_flat.reshape(-1, self.pred_len, self.input_dim)
