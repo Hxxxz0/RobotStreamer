@@ -4,6 +4,17 @@
 
 架构已从 **仅解码器 + MLP** 设计更新为扩散头中的 **Transformer 编码器-解码器** 设计。
 
+### 🆕 最新更新 (v2.1 - 2026-02-06)
+1. **✅ 修复了关键的 Padding Mask 问题**：
+   - 之前虽然生成了 `history_mask`，但模型完全没有使用
+   - 现在 Encoder 和 Decoder 都正确使用 `src_key_padding_mask` 和 `memory_key_padding_mask`
+   - 确保文本条件不会被 padding 污染
+
+2. **✅ 可配置的历史窗口长度**：
+   - 默认改为 5 帧（更快，适合短期预测）
+   - 可配置为 10/30/60 等（更多时序信息，但计算更慢）
+   - 通过 `configs/default.yaml` 中的 `history_len` 配置
+
 ---
 
 ## 📊 架构对比
@@ -23,18 +34,23 @@
 
 ### ✅ 新架构（当前）
 ```
-输入: history (60, 38) + text (512)
+输入: history (N, 38) + text (512) + history_mask (N,)
+    （N=history_len，默认5，可配置）
          ↓
-[MotionTokenMLP] → history_tokens (60, 16)
+[MotionTokenMLP] → history_tokens (N, 16)
          ↓
 [扩散头 - Transformer 编码器-解码器]
-    编码器输入: [timestep(1), history_tokens(60), text(1)] = 62 tokens
+    编码器输入: [timestep(1), history_tokens(N), text(1)] = N+2 tokens
+    + src_key_padding_mask: 标记 history 中的 padding 位置
          ↓
-    编码器 (4层) → memory (62, 512)
+    编码器 (4层) → memory (N+2, 512)
+    （padding 位置在 self-attention 中被忽略）
          ↓
     解码器输入: noisy_samples (5, 38)
+    + memory_key_padding_mask: 同样的 padding mask
          ↓
     解码器 (6层) + 交叉注意力到 memory
+    （cross-attention 忽略 memory 中的 padding）
          ↓
     输出: denoised_samples (5, 38)
 ```
@@ -50,6 +66,8 @@
 | **时间步** | AdaLN 调制 | 编码器中的 token |
 | **序列建模** | 将5帧展平为190维 | 保持5帧作为序列 |
 | **交叉注意力** | 无 | 有（解码器关注编码器 memory） |
+| **Padding 处理** | 无 mask（padding 污染） | ✅ 完整的 mask 机制 |
+| **历史长度** | 固定 60 帧 | 可配置（5/10/30/60） |
 
 ---
 
@@ -58,6 +76,10 @@
 ### `configs/default.yaml` 中的新参数
 
 ```yaml
+# Model
+history_len: 5                 # 历史窗口长度（可配置：5/10/30/60）
+pred_len: 5                    # 预测长度
+
 # Transformer 编码器-解码器（在扩散头中）
 n_decoder_layers: 6            # 解码器层数
 n_encoder_layers: 4            # 编码器层数
@@ -151,11 +173,22 @@ python test_new_architecture.py
    - 解码器将5个输出帧视为序列
    - 交叉注意力允许每帧关注历史的不同部分
 
-3. **更灵活**
+3. **✅ 正确的 Padding 处理（重要更新）**
+   - **Encoder**: 使用 `src_key_padding_mask` 在 self-attention 时忽略历史 padding
+   - **Decoder**: 使用 `memory_key_padding_mask` 在 cross-attention 时忽略历史 padding
+   - **文本条件不受影响**：timestep 和 text token 始终有效，不会被 mask
+   - **避免 padding 污染**：特别重要对于短历史窗口（如5帧）
+
+4. **可配置历史长度**
+   - 支持 5/10/30/60 等不同长度
+   - 短窗口（5帧）：计算快，但需要 mask 避免 padding 影响
+   - 长窗口（60帧）：时序信息丰富，但计算量大
+
+5. **更灵活**
    - 易于改变预测范围
    - 可以添加更多条件（如目标、约束）
 
-4. **更清晰的设计**
+6. **更清晰的设计**
    - 扩散头中的单一统一架构
    - 无需单独的 transformer 编码器
 
@@ -198,5 +231,5 @@ python test_new_architecture.py
 
 ---
 
-**最后更新**: 2026-02-05  
-**架构版本**: 2.0 (Transformer 编码器-解码器)
+**最后更新**: 2026-02-06  
+**架构版本**: 2.1 (Transformer 编码器-解码器 + Padding Mask 修复)

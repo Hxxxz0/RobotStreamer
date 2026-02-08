@@ -20,7 +20,7 @@ num_workers: 8
 # Training
 total_iter: 200000
 lr: 1e-4
-weight_decay: 0.0
+weight_decay: 0.01             # Regularization (DART uses 1e-2, helps prevent overfitting)
 seed: 123
 
 # Model
@@ -57,6 +57,7 @@ root_loss_weight: 10.0          # Loss weight multiplier for root features (dims
 text_encoder_type: t5  # or bge
 text_encoder: ""  # empty = use default (google/flan-t5-small or BAAI/bge-small-en-v1.5)
 text_encoder_device: cuda
+text_max_length: 60            # Max text token length for token-level encoding (T5 outputs per-token features)
 
 # Paths
 mean_std_dir: /limx_embap/tos/user/Jensen/project/dataset/statistics

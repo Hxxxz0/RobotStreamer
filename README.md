@@ -7,15 +7,17 @@
 ## 📖 项目简介
 
 MotionDiffusionCore 是一个用于机器人动作序列生成的深度学习框架。该项目采用：
-- **历史动作编码**：通过 MLP 将 60 帧历史动作映射为 token 序列
-- **统一的 Transformer 编码器-解码器**：在扩散头中融合时间步、历史和文本条件
+- **历史动作编码**：通过 MLP 将可配置长度的历史动作（默认60帧）映射为 token 序列
+- **Token-level 文本编码**：T5 输出 60 个文本 token（而非单一向量），提供更细粒度的语义信息
+- **统一的 Transformer 编码器-解码器**：在扩散头中融合时间步、历史和文本条件，**支持 padding mask**
 - **扩散生成**：通过 Transformer 解码器直接生成未来 5 帧动作序列
 
 **核心特点**：
 - ✅ 无需 VAE/TAE 等重型编码器，直接端到端训练
 - ✅ 统一的编码器-解码器架构，更强的序列建模能力
+- ✅ **Token-level 文本编码** + padding mask，增强文本控制力
 - ✅ 支持任意长度的流式生成（滚动预测）
-- ✅ 支持 Classifier-Free Guidance (CFG) 控制生成质量
+- ✅ 支持 Classifier-Free Guidance (CFG) 控制生成质量（零向量 masking）
 - ✅ 三个独立数据集，可灵活组合训练
 
 ---
@@ -25,33 +27,43 @@ MotionDiffusionCore 是一个用于机器人动作序列生成的深度学习框
 ### 整体流程
 
 ```
-输入：60帧历史动作 (38D) + 文本描述
+输入：history_len帧历史动作 (38D) + 文本描述
+    （默认 60 帧，可配置 5/10/30/60 等）
                 ↓
-    ┌───────────────────────────────┐
-    │  MotionTokenMLP (38→512→16)   │  ← 动作特征映射
-    └───────────────────────────────┘
+    ┌───────────────────────────────────────┐
+    │  MotionTokenMLP (38→512→16)           │  ← 动作特征映射
+    └───────────────────────────────────────┘
                 ↓
-         60个 16维 token
+         60个 16维 history token
                 ↓
-    ┌───────────────────────────────┐
-    │  Transformer 编码器-解码器      │  ← 扩散头
-    │                               │
-    │  [编码器 - 4层]                │
-    │  输入: timestep(1) +           │
-    │        history_tokens(60) +    │
-    │        text(1) = 62 tokens     │
-    │         ↓                      │
-    │  输出: memory (62, 512)        │
-    │         ↓                      │
-    │  [解码器 - 6层]                │
-    │  输入: noisy_samples (5, 38)   │
-    │  交叉注意力: ← memory          │
-    │         ↓                      │
-    │  输出: denoised (5, 38)        │
-    │                               │
-    │  - DDIM 快速采样（默认10步）     │
-    │  - Squared Cosine 噪声调度     │
-    └───────────────────────────────┘
+    ┌───────────────────────────────────────┐
+    │  T5 Text Encoder                      │  ← Token-level 文本编码 ✨
+    │  输入: "A person walks" (原始文本)      │
+    │  输出: 60个 512维 text token + mask    │
+    └───────────────────────────────────────┘
+                ↓
+    ┌───────────────────────────────────────┐
+    │  Transformer 编码器-解码器扩散头        │
+    │                                       │
+    │  [编码器 - 4层]                        │
+    │  输入: timestep(1) +                   │
+    │        history_tokens(60) +            │
+    │        text_tokens(60)                 │
+    │  + History Padding Mask ✅            │
+    │  + Text Padding Mask ✅               │
+    │         ↓                              │
+    │  输出: memory (121, 512)               │
+    │         ↓                              │
+    │  [解码器 - 6层]                        │
+    │  输入: noisy_samples (5, 38)           │
+    │  交叉注意力: ← memory                  │
+    │  + Memory Padding Mask ✅             │
+    │         ↓                              │
+    │  输出: denoised (5, 38)                │
+    │                                       │
+    │  - DDIM 快速采样（默认10步）             │
+    │  - Squared Cosine 噪声调度             │
+    └───────────────────────────────────────┘
                 ↓
        输出：未来5帧动作 (38D×5)
 ```
@@ -69,22 +81,28 @@ MotionDiffusionCore 是一个用于机器人动作序列生成的深度学习框
 **编码器部分**（4 层，可配置）：
 - **输入**：
   - 时间步嵌入 (1, 512D)
-  - 60 个历史 token (60, 16D)
-  - 文本条件向量 (1, 512D/1024D)
-  - 总计：62 个 token
-- **输出**：memory 向量 (62, 512D)
-- **作用**：双向融合所有条件信息
+  - history_len 个历史 token (60, 16D)
+  - **Token-level 文本嵌入 (60, 512D)** ✨ 新增
+  - **History Padding Mask**：标记哪些历史 token 是 padding（序列开始时）
+  - **Text Padding Mask**：标记哪些文本 token 是 padding（短文本补齐）
+  - 总计：121 个 token（1 + 60 + 60）
+- **输出**：memory 向量 (121, 512D)
+- **作用**：双向融合所有条件信息，**同时正确忽略 padding 位置**
 
 **解码器部分**（6 层，可配置）：
 - **输入**：
   - 带噪声的动作样本 (5, 38D)
   - 交叉注意力到编码器 memory
+  - **Memory Padding Mask**：在 cross-attention 时忽略历史和文本的 padding 位置
 - **输出**：去噪后的动作 (5, 38D)
-- **作用**：通过交叉注意力机制，让每一帧都能关注历史的不同部分
+- **作用**：通过交叉注意力机制，让每一帧都能关注有效的历史帧和文本 token（不受 padding 污染）
 
 **架构优势**：
+- ✅ **更强的文本条件融合**：60 个文本 token 提供细粒度语义信息（vs 旧版 1 个 token）
 - ✅ **更强的条件融合**：编码器可对所有条件进行双向注意力
 - ✅ **更好的序列建模**：解码器将 5 帧作为序列处理，而非展平
+- ✅ **正确的 Padding 处理**：通过 mask 机制，padding 不会污染 attention
+- ✅ **可配置历史长度**：支持 5/10/30/60 等不同长度，权衡计算效率和时序信息
 - ✅ **灵活扩展**：易于添加新的条件（如目标、约束）
 
 #### 3. **扩散过程** (`models/diffloss.py`)
@@ -196,7 +214,11 @@ MotionDiffusionCore 是一个用于机器人动作序列生成的深度学习框
 
 #### **4. 文本条件 Masking（CFG 训练）**
 - 默认关闭（`cfg_mask_prob=0.0`），遵循 Pi0 的方法
-- 可选启用：设置 `cfg_mask_prob=0.1`，随机将 10% 的样本文本置空（`caption = ""`）
+- 可选启用：设置 `cfg_mask_prob=0.1`，随机将 10% 的样本文本替换为**零向量 + 全 False mask**（真正的无条件）
+  ```python
+  feat_text[idx] = 0.0       # 零向量（而非空字符串编码）
+  text_mask[idx] = False     # 全 False = 模型忽略所有文本 token
+  ```
 - 作用：训练模型学习无条件生成，用于推理时的 Classifier-Free Guidance
 
 ---
@@ -318,6 +340,7 @@ accelerate launch --mixed_precision no --num_processes 4 \
 | `--text_encoder_type` | `t5` | 文本编码器类型 (`t5` / `bge`) |
 | `--text_encoder` | `flan-t5-small` | 具体模型名称 |
 | `--text_encoder_device` | `cuda` | 文本编码器设备 |
+| `--text_max_length` | `60` | 文本 token 最大长度（token-level 编码）|
 
 #### 其他参数
 | 参数 | 默认值 | 说明 |
@@ -457,20 +480,32 @@ Step N: [frame(N-59) - frame(N)] + text → 生成 frame[N+1 - N+5]
 CFG 通过混合有条件和无条件预测来增强文本控制：
 
 ```python
-pred_text = model(history, text_embedding)      # 有文本条件
-pred_uncond = model(history, zero_embedding)    # 无文本条件
+# 有文本条件
+pred_text = model(history, text_tokens, text_mask)      
+
+# 无文本条件（使用零向量 + 全 False mask）✨ 重要改进
+zero_text = torch.zeros_like(text_tokens)  # 零向量（而非空字符串编码）
+zero_mask = torch.zeros_like(text_mask, dtype=torch.bool)  # 全 False = 忽略所有文本
+pred_uncond = model(history, zero_text, zero_mask)
+
+# CFG 混合
 pred_final = pred_uncond + cfg_scale * (pred_text - pred_uncond)
 ```
 
 **推荐配置**：
 - `cfg=1.0`：关闭 CFG，标准生成
-- `cfg=7.5`：**推荐值**，显著增强文本一致性
+- `cfg=3.0-5.0`：**推荐值**（token-level text 下，CFG 效果更强，建议比旧版低）
 - `cfg=1.5-3.0`：轻度引导
 - `cfg>10.0`：可能过度拟合文本，导致动作不自然
 
+**架构改进（v2）**：
+- ✅ **零向量 masking**：真正的无条件（旧版用空字符串 `""` 产生非零嵌入）
+- ✅ **Text mask 标记**：零向量 + 全 False mask，模型完全忽略文本输入
+- ✅ **Token-level 增强**：60 个文本 token 提供更强的语义控制
+
 **注意**：
 - 默认训练时 `cfg_mask_prob=0.0`（关闭 CFG 训练），但推理时仍可使用 CFG
-- 如需更强的 CFG 效果，可在训练时设置 `cfg_mask_prob=0.1`（10% 文本遮罩）
+- 如需更强的 CFG 效果，可在训练时设置 `cfg_mask_prob=0.1`（10% 零向量 masking）
 
 ---
 
@@ -696,7 +731,13 @@ cp -r /limx_embap/tos/user/Jensen/project/MotionStreamer/flan-t5-small \
 
 本项目已从 **Transformer Decoder + MLP 扩散头** 架构升级为 **Transformer 编码器-解码器扩散** 架构。
 
-**主要变化**：
+**v2 最新改进（Token-level Text）**：
+- ✅ **Token-level 文本编码**：T5 输出 60 个 token（vs 旧版 1 个池化向量）
+- ✅ **Text padding mask**：短文本不会被 padding 稀释，增强文本控制力
+- ✅ **零向量 CFG**：真正的无条件（vs 旧版空字符串非零嵌入）
+- ✅ **权重衰减**：0.01 正则化，防止过拟合
+
+**v1 主要变化**：
 - ✅ 移除了独立的 LLaMAHF Transformer 编码器
 - ✅ 扩散头使用统一的 Transformer 编码器-解码器
 - ✅ 更强的条件融合和序列建模能力
@@ -721,11 +762,13 @@ cp -r /limx_embap/tos/user/Jensen/project/MotionStreamer/flan-t5-small \
 | Encoder Layers | 4 | Transformer 编码器层数 |
 | Decoder Layers | 6 | Transformer 解码器层数 |
 | Attention Heads | 8 | 注意力头数 |
+| **Text Max Length** | **60** | **文本 token 最大长度（token-level 编码）** ✨ |
 | Diffusion Steps (train) | 1000 | 训练时扩散步数（DDPM） |
 | Diffusion Steps (infer) | 10 | 推理时采样步数（DDIM，可配置 50） |
 | Beta Schedule | squaredcos_cap_v2 | 噪声调度类型 |
 | Prediction Type | sample | 预测目标（x0） |
-| CFG Mask Prob | 0.0 | CFG 训练文本遮罩概率（关闭） |
+| CFG Mask Prob | 0.0 | CFG 训练零向量遮罩概率（关闭） |
+| Weight Decay | 0.01 | 权重衰减（正则化，防止过拟合） |
 | Batch Size | 256 | 批次大小 |
 | Learning Rate | 1e-4 | 初始学习率 |
 | Total Iterations | 200k | 总训练步数 |

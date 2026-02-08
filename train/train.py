@@ -56,8 +56,8 @@ def load_checkpoint(model, ckpt_path, optimizer=None, scheduler=None):
         print(f"Loading checkpoint from {ckpt_path}")
     ckpt = torch.load(ckpt_path, map_location="cpu")
 
-    # Note: trans_encoder is now integrated into action_diffusion (Transformer Encoder-Decoder)
-    # Old checkpoints with separate "trans" key are not compatible with new architecture
+    # Note: Architecture v2 changes (token-level text, depthwise conv, new cond_pos_emb size)
+    # Old v1 checkpoints will have mismatched keys - use strict=False to load what we can
     
     if "token_mlp" in ckpt:
         model.token_mlp.load_state_dict(ckpt["token_mlp"], strict=True)
@@ -161,6 +161,8 @@ def parse_args():
                         choices=["bge", "t5"])
     parser.add_argument("--text_encoder", type=str, default=config.get("text_encoder", ""))
     parser.add_argument("--text_encoder_device", type=str, default=config.get("text_encoder_device", "cuda"))
+    parser.add_argument("--text_max_length", type=int, default=config.get("text_max_length", 60),
+                        help="Max text token length for token-level text encoding")
     
     # Other
     parser.add_argument("--resume_trans", type=str, default=config.get("resume_trans"))
@@ -203,11 +205,15 @@ def main():
         logger = None
         writer = None
 
+    # Text encoder config
+    text_max_length = getattr(args, 'text_max_length', 60)
+    
     text_encoder_path = resolve_text_encoder_path(
         args.text_encoder_type, args.text_encoder, repo_root
     )
     text_encoder, text_encoder_dim = load_text_encoder(
-        args.text_encoder_type, text_encoder_path, args.text_encoder_device
+        args.text_encoder_type, text_encoder_path, args.text_encoder_device,
+        max_length=text_max_length
     )
 
     history_len = args.history_len
@@ -218,6 +224,7 @@ def main():
         hidden_size=args.hidden_size,
         latent_dim=args.latent_dim,
         text_encoder_dim=text_encoder_dim,
+        text_max_length=text_max_length,
         history_len=history_len,
         pred_len=pred_len,
         device=device,
@@ -291,20 +298,24 @@ def main():
         history_mask = history_mask.to(device)  # [B, history_len], bool
 
         bs = len(caption)
-        # Classifier-Free Guidance: mask captions based on cfg_mask_prob
-        # cfg_mask_prob = 0.0: no masking (follows Pi0's approach)
-        # cfg_mask_prob > 0.0: mask captions for CFG training
+
+        # Encode text to token-level features: (B, text_max_length, text_dim) + mask (B, text_max_length)
+        unwrapped_text_encoder = accelerator.unwrap_model(text_encoder)
+        feat_text_np, text_mask_np = unwrapped_text_encoder.encode(caption)
+        feat_text = torch.from_numpy(feat_text_np).float().to(device)
+        text_mask = torch.from_numpy(text_mask_np).to(device)
+
+        # Classifier-Free Guidance: zero out text embeddings (not empty string!)
+        # cfg_mask_prob = 0.0: no masking
+        # cfg_mask_prob > 0.0: zero out text for CFG training
         if args.cfg_mask_prob > 0.0:
             num_masked = max(1, int(bs * args.cfg_mask_prob))
             mask_indices = random.sample(range(bs), num_masked)
             for idx in mask_indices:
-                caption[idx] = ""
+                feat_text[idx] = 0.0          # Zero vector (true unconditional)
+                text_mask[idx] = False         # Mark all text as padding
 
-        unwrapped_text_encoder = accelerator.unwrap_model(text_encoder)
-        feat_text = torch.from_numpy(unwrapped_text_encoder.encode(caption)).float()
-        feat_text = feat_text.to(device)
-
-        loss, _ = model(history, feat_text, target, history_mask=history_mask)
+        loss, _ = model(history, feat_text, target, history_mask=history_mask, text_mask=text_mask)
 
         optimizer.zero_grad()
         accelerator.backward(loss)

@@ -1,0 +1,108 @@
+# Rollout Training Configuration for Exposure Bias Mitigation
+# 基于 default.yaml，添加 Rollout Training 专用配置
+# 从 outputs/motion_diff/checkpoint_200000.pth 继续训练
+
+# ============================================================
+# 基础配置（继承自 default.yaml）
+# ============================================================
+
+# Datasets
+datasets:
+  - humanml3d
+  - babel_stream
+  - humanml3d_stream
+
+# Dataset paths
+humanml3d_path: /limx_embap/tos/user/Jensen/dataset/robot_humanml_data
+babel_stream_path: /limx_embap/tos/user/Jensen/project/dataset/babel_stream_50
+humanml3d_stream_path: /limx_embap/tos/user/Jensen/project/dataset/humanml3d_stream_50
+meta_dir: /limx_embap/tos/user/Jensen/project/dataset/statistics
+
+# Data loading
+batch_size: 256
+num_workers: 4  # Reduced for kernel 5.4.x compatibility (avoid deadlock)
+
+# Model architecture (保持不变)
+motion_dim: 38
+hidden_size: 512
+latent_dim: 16
+history_len: 60
+pred_len: 5
+
+n_decoder_layers: 6
+n_encoder_layers: 4
+n_heads: 8
+
+diffusion_width: 512
+grad_checkpointing: false
+
+# Diffusion config
+num_train_timesteps: 1000
+beta_schedule: squaredcos_cap_v2
+prediction_type: sample
+
+# CFG
+cfg_mask_prob: 0.0
+
+# Root Loss Weighting
+root_loss_weight: 10.0
+
+# Text Encoder
+text_encoder_type: t5
+text_encoder: ""
+text_encoder_device: cuda
+text_max_length: 60
+
+# Paths
+mean_std_dir: /limx_embap/tos/user/Jensen/project/dataset/statistics
+
+# ============================================================
+# Rollout Training 专用配置
+# ============================================================
+
+# 训练参数（微调）
+total_iter: 100000            # Stage 2+3 总迭代次数（约 80-100 epochs，视 batch size）
+lr: 5e-5                      # 降低学习率（原 1e-4 → 5e-5），因为是微调
+weight_decay: 0.01
+seed: 123
+
+# Checkpoint 加载
+resume_from: outputs/motion_diff/ckpt_200000.pth  # 从 Stage 1 的 200k checkpoint 继续
+
+# Rollout Training 配置
+rollout_training:
+  enabled: true
+  
+  # 训练阶段（2 或 3）
+  stage: 2                    # 2 = Scheduled Sampling, 3 = Full Rollout
+  
+  # Stage 2: Scheduled Sampling
+  stage2:
+    total_epochs: 100         # Scheduled Sampling 的总 epoch 数
+    rollout_ratio_start: 0.0  # 起始 rollout 比例（0% = 全部用 GT）
+    rollout_ratio_end: 1.0    # 结束 rollout 比例（100% = 全部用 rollout）
+    schedule_type: linear     # 调度方式：linear, cosine, exp
+  
+  # Stage 3: Full Rollout（可选）
+  stage3:
+    total_epochs: 50          # Full Rollout 的总 epoch 数
+    rollout_ratio: 1.0        # 固定使用 100% rollout
+  
+  # Rollout 参数
+  rollout_steps: 2            # 每个 history 做多少步 rollout（原 5 → 2，提速）
+  rollout_sampling_steps: 5   # 每步 rollout 的 DDIM 采样步数（原 10 → 5，提速）
+  rollout_cfg_scale: 1.0      # Rollout 时的 CFG 强度（1.0 = 无 CFG）
+  rollout_temperature: 1.0    # Rollout 采样温度
+  
+  # 混合训练策略（可选）
+  use_mixed_loss: false       # 是否同时计算 TF loss 和 rollout loss（更慢但更稳定）
+  
+  # 额外的鲁棒性技巧
+  history_noise_level: 0.0    # 给 history 添加噪声的强度（0 = 不添加）
+
+# 输出配置
+exp_name: motion_diff_rollout  # 实验名称，避免覆盖 Stage 1 模型
+num_sampling_steps: 10         # 推理时的采样步数（保持不变）
+
+# 推理配置（与 default.yaml 一致）
+resume_trans: null

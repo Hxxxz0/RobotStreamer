@@ -1,0 +1,52 @@
+# Configuration for overfitting on a single data sample
+# This is useful for debugging and verifying model learning capability
+
+# Data paths (modify these to point to your 000000.npz file)
+npz_path: /limx_embap/tos/user/Jensen/dataset/robot_humanml_data/npz/000000.npz
+text_path: /limx_embap/tos/user/Jensen/dataset/robot_humanml_data/texts/000000.txt
+meta_dir: /limx_embap/tos/user/Jensen/project/dataset/statistics
+
+# Training parameters (optimized for fast overfitting)
+batch_size: 4                  # Small batch for overfitting
+total_iter: 5000               # Should be enough to see loss -> 0
+lr: 1e-3                       # Higher LR for faster convergence
+weight_decay: 0.0              # No regularization (we want to overfit!)
+seed: 123
+
+# Model parameters (should match your main config)
+motion_dim: 38
+hidden_size: 512
+latent_dim: 16
+history_len: 60
+pred_len: 5
+
+# Transformer Encoder-Decoder
+n_decoder_layers: 6
+n_encoder_layers: 4
+n_heads: 8
+
+# Diffusion config
+num_sampling_steps: 10
+num_train_timesteps: 1000
+beta_schedule: squaredcos_cap_v2
+prediction_type: sample
+diffusion_width: 512
+grad_checkpointing: false
+
+# Root Loss Weighting
+root_loss_weight: 1.0
+
+# Text Encoder
+text_encoder_type: t5
+text_encoder: ""
+text_encoder_device: cuda
+text_max_length: 60
+
+# Output
+exp_name: overfit_single
+
+# Logging
+log_every: 10                  # Log every 10 iterations to see progress
+
+# Optional: Resume from pretrained checkpoint
+# resume_trans: outputs/motion_diff/latest.pth

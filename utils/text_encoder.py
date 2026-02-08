@@ -6,7 +6,7 @@ import torch
 
 
 class T5TextEncoder(torch.nn.Module):
-    def __init__(self, model_name: str, device: torch.device):
+    def __init__(self, model_name: str, device: torch.device, max_length: int = 60):
         super().__init__()
         from transformers import T5Tokenizer, T5EncoderModel
 
@@ -15,23 +15,36 @@ class T5TextEncoder(torch.nn.Module):
         self.device = device
         self.model.eval()
         self.output_dim = self.model.config.d_model
+        self.max_length = max_length
 
-    def encode(self, texts: Union[str, List[str]]) -> np.ndarray:
+    def encode(self, texts: Union[str, List[str]]) -> Tuple[np.ndarray, np.ndarray]:
+        """Encode text to token-level features.
+        
+        Args:
+            texts: Single string or list of strings
+            
+        Returns:
+            feats: (B, max_length, dim) or (max_length, dim) if single string
+            mask: (B, max_length) or (max_length,) if single string - True=valid, False=padding
+        """
         single = isinstance(texts, str)
         if single:
             texts = [texts]
 
         with torch.no_grad():
             inputs = self.tokenizer(
-                texts, return_tensors="pt", padding=True, truncation=True
+                texts, return_tensors="pt",
+                padding="max_length", max_length=self.max_length, truncation=True
             ).to(self.device)
             outputs = self.model(**inputs)
-            mask = inputs.attention_mask.unsqueeze(-1)
-            feats = (outputs.last_hidden_state * mask).sum(dim=1) / mask.sum(dim=1)
-            feats = feats.float()
+            feats = outputs.last_hidden_state.float()  # (B, max_length, dim)
+            mask = inputs.attention_mask.bool()  # (B, max_length), True=valid
 
         feats = feats.detach().cpu().numpy()
-        return feats[0] if single else feats
+        mask = mask.detach().cpu().numpy()
+        if single:
+            return feats[0], mask[0]
+        return feats, mask
 
 
 def resolve_text_encoder_path(text_encoder_type: str, text_encoder: str, repo_root: str) -> str:
@@ -56,12 +69,13 @@ def resolve_text_encoder_path(text_encoder_type: str, text_encoder: str, repo_ro
 
 
 def load_text_encoder(
-    text_encoder_type: str, model_name_or_path: str, device: Union[str, torch.device]
+    text_encoder_type: str, model_name_or_path: str, device: Union[str, torch.device],
+    max_length: int = 60
 ) -> Tuple[torch.nn.Module, int]:
     device = torch.device(device)
 
     if text_encoder_type == "t5":
-        encoder = T5TextEncoder(model_name_or_path, device)
+        encoder = T5TextEncoder(model_name_or_path, device, max_length=max_length)
         return encoder, encoder.output_dim
 
     from sentence_transformers import SentenceTransformer

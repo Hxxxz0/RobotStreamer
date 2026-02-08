@@ -45,10 +45,20 @@ def build_history_window(history, history_len, input_dim):
 
 
 def encode_text(text_encoder, text, device):
-    feat = torch.from_numpy(text_encoder.encode(text)).float().to(device)
-    if feat.ndim == 1:
+    """Encode text to token-level features.
+    
+    Returns:
+        feat: (1, text_max_length, text_dim) tensor
+        mask: (1, text_max_length) bool tensor
+    """
+    feat_np, mask_np = text_encoder.encode(text)
+    # Single string returns (text_max_length, dim) and (text_max_length,)
+    feat = torch.from_numpy(feat_np).float().to(device)
+    mask = torch.from_numpy(mask_np).to(device)
+    if feat.ndim == 2:
         feat = feat.unsqueeze(0)
-    return feat
+        mask = mask.unsqueeze(0)
+    return feat, mask
 
 
 def main():
@@ -61,6 +71,7 @@ def main():
     parser.add_argument("--text_encoder", type=str, default="")
     parser.add_argument("--text_encoder_type", type=str, default="t5", choices=["bge", "t5"])
     parser.add_argument("--text_encoder_device", type=str, default="cuda")
+    parser.add_argument("--text_max_length", type=int, default=60, help="Max text token length")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--history_len", type=int, default=60)
     parser.add_argument("--pred_len", type=int, default=5)
@@ -82,16 +93,20 @@ def main():
     # Sampling config
     parser.add_argument("--cfg", type=float, default=7.5, help="Classifier-free guidance scale (1.0=off, 7.5=recommended)")
     parser.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature")
-    parser.add_argument("--max_motion_length", type=int, default=150, help="Total frames to generate")
+    parser.add_argument("--max_motion_length", type=int, default=150, help="Total frames to generate (ignored if --num_iterations is set)")
+    parser.add_argument("--num_iterations", type=int, default=None, help="Total iteration count (overrides max_motion_length if set)")
+    parser.add_argument("--slide_step", type=int, default=None, help="Sliding step: keep first N predicted frames per iter (default=pred_len, set 1 for single-frame sliding)")
     parser.add_argument("--fps", type=int, default=50, help="FPS for output")
     parser.add_argument("--smooth", action="store_true", help="Apply smoothing")
+    parser.add_argument("--slide_window_size", type=int, default=None, help="[Deprecated] Use --slide_step instead")
     parser.add_argument("--out_dir", type=str, default="output")
     args = parser.parse_args()
 
     device = torch.device(args.device)
     text_encoder_path = resolve_text_encoder_path(args.text_encoder_type, args.text_encoder, repo_root)
     text_encoder, text_encoder_dim = load_text_encoder(
-        args.text_encoder_type, text_encoder_path, args.text_encoder_device
+        args.text_encoder_type, text_encoder_path, args.text_encoder_device,
+        max_length=args.text_max_length
     )
 
     mean = np.load(args.mean)
@@ -110,7 +125,7 @@ def main():
             "motion_dim", "hidden_size", "latent_dim", 
             "n_decoder_layers", "n_encoder_layers", "n_heads",
             "history_len", "pred_len", "diffusion_width", "prediction_type", "beta_schedule",
-            "num_train_timesteps"
+            "num_train_timesteps", "text_max_length"
         ]
         for key in model_keys:
             if key in ckpt_args:
@@ -136,11 +151,13 @@ def main():
     history, history_mask = build_history_window(history, args.history_len, input_dim)
 
     # Initialize Model
+    text_max_length = getattr(args, 'text_max_length', 60)
     model = MotionDiffusionModel(
         input_dim=motion_dim,
         hidden_size=args.hidden_size,
         latent_dim=args.latent_dim,
         text_encoder_dim=text_encoder_dim,
+        text_max_length=text_max_length,
         history_len=args.history_len,
         pred_len=args.pred_len,
         device=device,
@@ -180,15 +197,28 @@ def main():
     model.load_state_dict(loaded_state, strict=False)
     model.eval()
 
-    feat_text = encode_text(text_encoder, args.text, device)
-    empty_feat = encode_text(text_encoder, "", device) if args.cfg != 1.0 else None
+    feat_text, text_mask = encode_text(text_encoder, args.text, device)
+
+    # Sliding step: keep first N predicted frames per iteration
+    slide_step = args.slide_step if args.slide_step is not None else args.pred_len
+    if slide_step > args.pred_len:
+        print(f"[Warning] slide_step ({slide_step}) > pred_len ({args.pred_len}), clamping to pred_len")
+        slide_step = args.pred_len
+    
+    # Determine number of iterations
+    if args.num_iterations is not None:
+        num_iterations = args.num_iterations
+        estimated_frames = num_iterations * slide_step
+        print(f"[Info] Using --num_iterations={num_iterations}, estimated output: ~{estimated_frames} frames")
+    else:
+        num_iterations = (args.max_motion_length + slide_step - 1) // slide_step
+        print(f"[Info] Generating {num_iterations} iterations (~{args.max_motion_length} frames)")
 
     all_predictions = []
     current_history = history.copy()
     current_mask = history_mask.copy()
-    num_iterations = (args.max_motion_length + args.pred_len - 1) // args.pred_len
 
-    print(f"[Info] Generating {num_iterations} iterations (~{args.max_motion_length} frames)")
+    print(f"[Info] Sliding config: pred_len={args.pred_len}, slide_step={slide_step} (keep first {slide_step} frames per iter)")
 
     with torch.no_grad():
         for iter_idx in range(num_iterations):
@@ -196,30 +226,37 @@ def main():
             history_tensor = torch.from_numpy(current_history[-args.history_len:]).unsqueeze(0).to(device).float()
             mask_tensor = torch.from_numpy(current_mask[-args.history_len:]).unsqueeze(0).to(device)
             
-            # Predict using model method
+            # Predict using model method (always predicts pred_len frames)
+            # CFG uses zero vectors internally (no need for empty_feat_text)
             pred_tensor = model.predict(
                 history_tensor, 
                 feat_text, 
                 cfg_scale=args.cfg, 
-                empty_feat_text=empty_feat,
                 temperature=args.temperature,
-                history_mask=mask_tensor
+                history_mask=mask_tensor,
+                text_mask=text_mask
             )
             
-
-            pred = pred_tensor.squeeze(0).cpu().numpy() # (5, 38)
-            pred_denorm = pred * std + mean
+            pred = pred_tensor.squeeze(0).cpu().numpy()  # (pred_len, 38)
+            
+            # Keep only first slide_step frames
+            pred_to_keep = pred[:slide_step]  # (slide_step, 38)
+            pred_denorm = pred_to_keep * std + mean
 
             all_predictions.append(pred_denorm)
-            current_history = np.concatenate([current_history, pred], axis=0)
-            # Mark new frames as valid (not padding)
-            new_mask = np.ones(pred.shape[0], dtype=bool)
+            
+            # Slide history window by slide_step frames
+            current_history = np.concatenate([current_history, pred_to_keep], axis=0)
+            new_mask = np.ones(slide_step, dtype=bool)
             current_mask = np.concatenate([current_mask, new_mask], axis=0)
 
-            print(f"[Info] Iteration {iter_idx + 1}/{num_iterations}: Generated {pred_denorm.shape[0]} frames")
+            print(f"[Info] Iteration {iter_idx + 1}/{num_iterations}: Predicted {pred.shape[0]} frames, kept {pred_to_keep.shape[0]} frames")
 
     final_motion = np.concatenate(all_predictions, axis=0)
-    final_motion = final_motion[:args.max_motion_length]
+    
+    # Trim to max_motion_length only if num_iterations was not explicitly set
+    if args.num_iterations is None:
+        final_motion = final_motion[:args.max_motion_length]
     
     print(f"[Info] Final motion shape: {final_motion.shape}")
 

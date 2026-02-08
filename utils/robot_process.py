@@ -53,46 +53,26 @@ def process_robot_npz(npz_data, root_idx=0):
     body_pos_w[:, :, 1] -= root_xy_init[1]
     
     # Step 3: Align facing direction to +X
-    # Use body structure to determine initial facing direction
-    # Robot body indices (estimated from typical humanoid structure):
-    # Assuming index 0 is root/base, we need to identify hip/shoulder indices
-    # For now, use simplified approach: compute average lateral direction
+    # Extract forward direction from root quaternion (more robust than body spread)
+    root_quat_init = body_quat_w[0, root_idx, :]  # (4,) wxyz format
     
-    # Get initial frame positions for orientation calculation
-    positions_init = body_pos_w[0]  # (30, 3)
+    # Rotate [1, 0, 0] vector by quaternion to get forward direction
+    # q * v * q^-1 where v = [0, 1, 0, 0] (pure quaternion)
+    w, x, y, z = root_quat_init
+    forward_x = 1 - 2 * (y * y + z * z)
+    forward_y = 2 * (x * y + w * z)
+    forward_z = 2 * (x * z - w * y)
+    forward_init_3d = np.array([forward_x, forward_y, forward_z])
     
-    # Try to identify lateral (left-right) direction from body spread
-    # Simple heuristic: find points with largest Y spread (lateral direction)
-    y_range = positions_init[:, 1].max() - positions_init[:, 1].min()
-    x_range = positions_init[:, 0].max() - positions_init[:, 0].min()
-    
-    # If Y spread is larger, assume Y is lateral (across), X is forward
-    # If X spread is larger, assume X is lateral, Y is forward
-    if y_range > x_range:
-        # Y is lateral (left-right), so forward should be in X direction
-        # Compute across vector in Y direction
-        across = np.array([0, 1, 0])  # Lateral direction
-    else:
-        # X is lateral, forward should be in Y direction
-        across = np.array([1, 0, 0])
-    
-    # Compute forward direction (perpendicular to across and Z-up)
-    # forward = Z x across (cross product)
-    z_up = np.array([0, 0, 1])
-    forward_init = np.cross(z_up, across)
+    # Project to XY plane (remove Z component) and normalize
+    forward_init = forward_init_3d[:2]  # Take XY components
     forward_init = forward_init / (np.linalg.norm(forward_init) + 1e-8)
     
-    # Target direction: +X
-    target = np.array([1, 0, 0])
+    # Add Z=0 component for qbetween_np (needs 3D vectors)
+    forward_init = np.array([forward_init[0], forward_init[1], 0.0])
     
-    # Handle special case: if forward is opposite to target (180° rotation)
-    # This would cause NaN in qbetween_np, so we flip the across direction
-    dot_product = np.dot(forward_init, target)
-    if dot_product < -0.99:  # Nearly opposite directions
-        # Flip across to get opposite forward direction
-        across = -across
-        forward_init = np.cross(z_up, across)
-        forward_init = forward_init / (np.linalg.norm(forward_init) + 1e-8)
+    # Target direction: +X (always align to positive X axis)
+    target = np.array([1, 0, 0])
     
     # Compute rotation quaternion to align forward to target
     # This rotates around Z-axis to align horizontal direction
